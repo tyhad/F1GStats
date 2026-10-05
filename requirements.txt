@@ -1,0 +1,10 @@
+# Requirements – F1GStats
+#
+# Install: pip install -r requirements.txt
+#
+# Versi berikut adalah versi yang dipakai saat development.
+# Untuk daftar lengkap seluruh transitive dependencies, jalankan:
+#   pip freeze > requirements-freeze.txt
+
+fastf1==3.8.3
+requests==2.34.2
