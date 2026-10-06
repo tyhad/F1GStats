@@ -25,10 +25,16 @@ Format mengikuti [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Tes: `tests/test_validation.py` (V1-V6), gerbang dan `data_health` di `tests/test_write_to_sqlite.py`, dan `tests/test_main_gate.py` (end-to-end `main()` dengan fetch di-mock; exit code 2 dan data lama tetap).
 - `validation` ditambahkan ke `py-modules` di `pyproject.toml` agar perintah `f1gstats` hasil instalasi bisa meng-import-nya.
 - README: dokumentasi tabel `schedule_full`, `race_results`, dan `data_health`.
+- Tabel `qualifying_results` (`season, round, driver_abbr, position`, PK `season, round, driver_abbr`): hasil Qualifying reguler per driver per round (Step 7, untuk countback level iv). Diganti per season dalam transaksi yang sama dengan tabel data lain; tidak ikut V1-V6. `schema_version` tetap `2` karena perubahannya hanya penambahan tabel.
+- `fetch_qualifying_rows(ergast, season)`: mengambil semua halaman hasil Qualifying (`_iter_result_pages`), `[]` kalau belum ada, error sungguhan tidak ditelan; mencetak `[WARN]` bila jumlah baris terbaca != total dari API.
+- `main()`: langkah `[7/12]` mencetak jumlah baris/round qualifying dan `[WARN]` informatif bila ada round dengan hasil Race tapi tanpa hasil Qualifying. `write_to_sqlite` menerima `qualifying_rows` (opsional; `None` = tabel tidak disentuh).
+- Tes: `tests/test_fetch_qualifying_rows.py` (mapping, paging 132 baris, driver tanpa Q2/Q3, error tidak ditelan), tes tulis/replace/rollback `qualifying_results` di `tests/test_write_to_sqlite.py`, dan `tests/test_main_gate.py` memeriksa qualifying ikut tertulis / tidak berubah saat validasi gagal.
+- README: dokumentasi tabel `qualifying_results`.
 
 ### Changed
 - `fetch_results_rows`: error sungguhan saat fetch Sprint (jaringan/HTTP/JSON) tidak lagi ditelan dan dikembalikan sebagai `[]`; error naik ke `__main__`. Hanya respons kosong yang menjadi `[]`.
 - Label progres di `main()` jadi `[x/11]` (langkah validasi ditambahkan).
+- Label progres di `main()` jadi `[x/12]` (langkah qualifying ditambahkan).
 - `write_to_sqlite`: seluruh penulisan data kini satu transaksi eksplisit (`BEGIN` ... `commit`). Error apa pun -> `rollback()`, koneksi ditutup, exception dilempar ulang, sehingga tabel tidak berubah. `__main__` mencetak error ke stderr dan `sys.exit(1)`.
 - `schedule_full` dan `race_results` diganti per season (replace, bukan upsert). Pembuatan tabel/migrasi kolom tetap idempotent dan berjalan sebelum transaksi data.
 - README: catatan "Re-run" diperbarui; `schema_version` ditambahkan ke deskripsi tabel `meta`.

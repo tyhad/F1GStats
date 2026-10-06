@@ -5,10 +5,13 @@ Step 1 (baseline) is done. Read `docs/DATA_CONTRACT.md` first. Add a `CHANGELOG.
 
 ## What the current code does (do not guess)
 
+Status: Steps 1b-6 are merged into `main` (PR #1). Step 7 is described at the end of this file.
+
 - `fetch_sessions` calls `fastf1.get_event_schedule`, then `select_relevant_rounds` keeps only previous / now / next. The `sessions` table must stay exactly like this (LiveOverlay depends on it).
-- `fetch_all_race_results` makes one Ergast call (`limit=2000`) and returns only aggregates (podiums, dnf_dns). It does not keep per-round rows.
-- `write_to_sqlite` already uses one connection: `DELETE` then `INSERT`, then `commit()`.
-- `__main__` prints errors but exits with code 0.
+- Jolpica caps every response at 100 rows and silently truncates a larger `limit` (so `limit=2000` is not enough). FastF1 does not auto-paginate. Every season-wide Ergast call (`fetch_all_race_results`, `fetch_results_rows`, `fetch_qualifying_rows`) therefore walks all pages through `_iter_result_pages`. Never rely on a single call for a whole season.
+- `fetch_all_race_results` returns only aggregates (podiums, dnf_dns). Per-round rows come from `fetch_results_rows` (Race and Sprint).
+- `write_to_sqlite` writes everything in one explicit transaction: `DELETE` then `INSERT`, then `commit()`; any error rolls back and re-raises. `schedule_full`, `race_results`, and `qualifying_results` are replaced per season. `meta.schema_version` is `2`.
+- `main()` validates (V1-V6) before writing. Exit codes: 0 ok or warn, 1 unexpected error, 2 validation failed (data tables untouched, `data_health` recorded).
 
 ---
 

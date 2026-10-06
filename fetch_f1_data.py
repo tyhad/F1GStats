@@ -510,6 +510,53 @@ def fetch_results_rows(ergast: Ergast, season: int, session: str) -> list[dict]:
 
 
 # ---------------------------------------------------------------------------
+# Fetch: hasil Qualifying per round  (untuk tabel qualifying_results, Step 7)
+# ---------------------------------------------------------------------------
+
+def fetch_qualifying_rows(ergast: Ergast, season: int) -> list[dict]:
+    """
+    Return list[dict] — satu baris per driver per round yang qualifying-nya sudah selesai:
+      {season, round, driver_abbr, position}
+
+    Hanya Qualifying reguler (bukan Sprint Qualifying). `position` = urutan hasil
+    Qualifying resmi dari API. Belum ada qualifying -> [] (tidak raise). Semua halaman
+    diambil (Jolpica membatasi 100 baris per respons, lihat _iter_result_pages).
+    Error sungguhan (jaringan, HTTP, JSON) tidak ditelan.
+    """
+    resp = ergast.get_qualifying_results(season=season, limit=2000)
+    expected_total = resp.total_results
+
+    _printed_header = False
+    rows = []
+
+    for page in _iter_result_pages(resp):
+        for round_df, desc_row in zip(page.content, page.description.itertuples()):
+            if round_df.empty:
+                continue
+
+            # Print columns + sample row sekali saja (sesuai aturan AGENTS.md)
+            if not _printed_header:
+                print(f"  [DEBUG] Qualifying result df.columns: {round_df.columns.tolist()}")
+                print(f"  [DEBUG] Qualifying sample row: {round_df.iloc[0].to_dict()}")
+                _printed_header = True
+
+            round_no = int(desc_row.round)
+            for _, r in round_df.iterrows():
+                raw_pos = r.get("position")
+                position = None if raw_pos is None or str(raw_pos) in ("", "nan", "<NA>") else int(raw_pos)
+                rows.append({
+                    "season": season,
+                    "round": round_no,
+                    "driver_abbr": str(r.get("driverCode") or r.get("familyName") or ""),
+                    "position": position,
+                })
+
+    if len(rows) != expected_total:
+        print(f"  [WARN] Qualifying: {len(rows)} baris terbaca, tapi API melaporkan total {expected_total}")
+    return rows
+
+
+# ---------------------------------------------------------------------------
 # Fetch: starting grid ACTUAL via OpenF1 (post-penalty), fallback Qualifying
 # ---------------------------------------------------------------------------
 
@@ -780,6 +827,14 @@ CREATE TABLE IF NOT EXISTS data_health (
   status TEXT NOT NULL,
   details_json TEXT NOT NULL
 );
+
+CREATE TABLE IF NOT EXISTS qualifying_results (
+  season INTEGER NOT NULL,
+  round INTEGER NOT NULL,
+  driver_abbr TEXT NOT NULL,
+  position INTEGER,
+  PRIMARY KEY (season, round, driver_abbr)
+);
 """
 
 
@@ -799,7 +854,7 @@ def _migrate_schema(cur: sqlite3.Cursor) -> None:
 SCHEMA_VERSION = "2"
 
 
-def write_to_sqlite(db_path: str, season: int, sessions, driver_rows, constructor_rows, starting_grid_rows, schedule_full_rows, race_results_rows, health=None):
+def write_to_sqlite(db_path: str, season: int, sessions, driver_rows, constructor_rows, starting_grid_rows, schedule_full_rows, race_results_rows, health=None, qualifying_rows=None):
     """
     Tulis semua tabel data dalam SATU transaksi SQLite. Error apa pun -> rollback
     (tabel tetap seperti sebelumnya), koneksi ditutup, lalu exception dilempar ulang.
@@ -809,6 +864,9 @@ def write_to_sqlite(db_path: str, season: int, sessions, driver_rows, constructo
     - schedule_full / race_results: DIGANTI per season (DELETE ... WHERE season = ?
       lalu INSERT), bukan upsert. Satu musim datang dalam satu panggilan API, jadi
       mengganti juga membawa koreksi pasca-race dan baris yang dihapus.
+
+    qualifying_rows: list[dict] untuk qualifying_results; DIGANTI per season seperti
+    race_results. None = pemanggil tidak menyediakan data qualifying, tabel tidak disentuh.
 
     health: (status, details) dari validation.run_checks. Kalau diberikan, satu baris
     data_health ditulis di transaksi yang SAMA dengan data (ok/warn).
@@ -831,6 +889,8 @@ def write_to_sqlite(db_path: str, season: int, sessions, driver_rows, constructo
         # schedule_full + race_results: replace per season
         cur.execute("DELETE FROM schedule_full WHERE season = ?", (season,))
         cur.execute("DELETE FROM race_results WHERE season = ?", (season,))
+        if qualifying_rows is not None:
+            cur.execute("DELETE FROM qualifying_results WHERE season = ?", (season,))
 
         cur.executemany(
             "INSERT INTO sessions (round, race_name, session_type, start_time_utc, circuit_name, country_flag, round_relation) "
@@ -865,6 +925,12 @@ def write_to_sqlite(db_path: str, season: int, sessions, driver_rows, constructo
             ":grid, :position, :position_text, :points, :status, :is_classified)",
             race_results_rows,
         )
+        if qualifying_rows:
+            cur.executemany(
+                "INSERT INTO qualifying_results (season, round, driver_abbr, position) "
+                "VALUES (:season, :round, :driver_abbr, :position)",
+                qualifying_rows,
+            )
 
         now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
         cur.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('season', ?)", (str(season),))
@@ -938,12 +1004,12 @@ def main():
 
     now_utc = datetime.now(timezone.utc)
 
-    print(f"[1/11] Fetch season schedule {args.season} ...")
+    print(f"[1/12] Fetch season schedule {args.season} ...")
     ergast = Ergast()
     schedule = fastf1.get_event_schedule(args.season, include_testing=False)
     print(f"      -> {len(schedule)} round di kalender musim ini")
 
-    print("[2/11] Fetch nama sirkuit resmi per ronde ...")
+    print("[2/12] Fetch nama sirkuit resmi per ronde ...")
     circuit_names_by_round = fetch_circuit_names(ergast, args.season)
 
     sessions, round_relations, selected_rounds, location_by_round = fetch_sessions(
@@ -951,21 +1017,21 @@ def main():
     )
     print(f"      -> {len(sessions)} sesi ditemukan (round before/now/after saja)")
 
-    print("[3/11] Build schedule_full (semua round musim) ...")
+    print("[3/12] Build schedule_full (semua round musim) ...")
     schedule_full_rows = build_schedule_full(schedule, args.season, now_utc)
     sprint_count = sum(r["has_sprint"] for r in schedule_full_rows)
     completed_count = sum(1 for r in schedule_full_rows if r["status"] == "completed")
     print(f"      -> {len(schedule_full_rows)} round total, {sprint_count} sprint weekend, {completed_count} completed")
 
-    print("[4/11] Fetch hasil tiap race musim ini (untuk podium & DNF/DNS) ...")
+    print("[4/12] Fetch hasil tiap race musim ini (untuk podium & DNF/DNS) ...")
     driver_race_stats, constructor_race_stats = fetch_all_race_results(ergast, args.season)
 
-    print("[5/11] Fetch race_results (Grand Prix, per driver per round) ...")
+    print("[5/12] Fetch race_results (Grand Prix, per driver per round) ...")
     race_results_rows = fetch_results_rows(ergast, args.season, "Race")
     gp_rounds = len({r["round"] for r in race_results_rows})
     print(f"      -> {len(race_results_rows)} baris ({gp_rounds} round GP)")
 
-    print("[6/11] Fetch race_results (Sprint, per driver per round) ...")
+    print("[6/12] Fetch race_results (Sprint, per driver per round) ...")
     sprint_rows = fetch_results_rows(ergast, args.season, "Sprint")
     sprint_rounds = {r["round"] for r in sprint_rows}
     print(f"      -> {len(sprint_rows)} baris ({len(sprint_rounds)} round sprint)")
@@ -976,21 +1042,30 @@ def main():
         print(f"      [WARN] round {unexpected} punya hasil sprint tapi has_sprint=0 di schedule_full")
     race_results_rows = race_results_rows + sprint_rows
 
-    print("[7/11] Fetch WDC standing ...")
+    print("[7/12] Fetch qualifying_results (Qualifying, per driver per round) ...")
+    qualifying_rows = fetch_qualifying_rows(ergast, args.season)
+    qualifying_rounds = {r["round"] for r in qualifying_rows}
+    print(f"      -> {len(qualifying_rows)} baris ({len(qualifying_rounds)} round qualifying)")
+    # Sanity check informatif (bukan validasi; qualifying tidak masuk V1-V6)
+    no_quali = sorted({r["round"] for r in race_results_rows if r["session"] == "Race"} - qualifying_rounds)
+    if no_quali:
+        print(f"      [WARN] round {no_quali} punya hasil Race tapi tidak punya hasil Qualifying")
+
+    print("[8/12] Fetch WDC standing ...")
     driver_rows = fetch_driver_standings(ergast, args.season, driver_race_stats)
     print(f"      -> {len(driver_rows)} driver")
 
-    print("[8/11] Fetch WCC standing ...")
+    print("[9/12] Fetch WCC standing ...")
     constructor_rows = fetch_constructor_standings(ergast, args.season, constructor_race_stats)
     print(f"      -> {len(constructor_rows)} constructor")
 
-    print("[9/11] Fetch starting grid (OpenF1 actual, fallback Qualifying) round terkait ...")
+    print("[10/12] Fetch starting grid (OpenF1 actual, fallback Qualifying) round terkait ...")
     starting_grid_rows = fetch_starting_grid(
         ergast, args.season, selected_rounds, round_relations, location_by_round
     )
     print(f"      -> {len(starting_grid_rows)} baris starting grid")
 
-    print("[10/11] Validasi data (V1-V6) ...")
+    print("[11/12] Validasi data (V1-V6) ...")
     health_status, health_details = run_checks(
         driver_rows, constructor_rows, race_results_rows, schedule_full_rows
     )
@@ -999,13 +1074,13 @@ def main():
         print(f"      {d['id']} [{d['status']}] {d['message']}")
     print(f"      -> status keseluruhan: {health_status}")
 
-    print(f"[11/11] Tulis ke SQLite: {args.output}")
+    print(f"[12/12] Tulis ke SQLite: {args.output}")
     exit_code = write_or_reject(
         args.output, args.season,
         dict(
             sessions=sessions, driver_rows=driver_rows, constructor_rows=constructor_rows,
             starting_grid_rows=starting_grid_rows, schedule_full_rows=schedule_full_rows,
-            race_results_rows=race_results_rows,
+            race_results_rows=race_results_rows, qualifying_rows=qualifying_rows,
         ),
         health_status, health_details,
     )
@@ -1020,6 +1095,7 @@ def main():
     print(f"Schedule full  : {len(schedule_full_rows)} round ({sprint_count} sprint, {completed_count} completed)")
     print(f"Race results   : {len(race_results_rows) - len(sprint_rows)} baris GP ({gp_rounds} round), "
           f"{len(sprint_rows)} baris Sprint ({len(sprint_rounds)} round)")
+    print(f"Qualifying     : {len(qualifying_rows)} baris ({len(qualifying_rounds)} round)")
     print(f"Sessions       : {len(sessions)}")
     print(f"Driver standing: {len(driver_rows)}")
     print(f"Constructor    : {len(constructor_rows)}")

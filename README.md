@@ -183,6 +183,18 @@ Satu baris per driver per sesi per round yang sudah selesai. Diganti per `season
 
 Untuk hitungan "finis resmi" (countback, podium), pakai `is_classified = 1`, bukan `position` saja.
 
+### `qualifying_results`
+Hasil Qualifying reguler (bukan Sprint Qualifying), satu baris per driver per round yang sudah selesai. Diganti per `season` setiap run. Dipakai untuk countback level iv.
+
+| Kolom | Tipe | Keterangan |
+|-------|------|------------|
+| `season` | INTEGER | Tahun musim (PK: `season`, `round`, `driver_abbr`) |
+| `round` | INTEGER | Nomor ronde |
+| `driver_abbr` | TEXT | Kode 3 huruf |
+| `position` | INTEGER | Posisi hasil Qualifying resmi |
+
+Tabel ini tidak ikut validasi V1-V6. Baca `meta.schema_version` (`2`) seperti biasa; database lama yang dibuat sebelum Step 7 tidak punya tabel ini sampai fetch dijalankan lagi.
+
 ### `data_health`
 Satu baris per run: hasil validasi V1-V6 (lihat `docs/DATA_CONTRACT.md`, bagian 5).
 
