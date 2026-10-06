@@ -213,8 +213,7 @@ def select_relevant_rounds(schedule, now_utc: datetime):
     return filtered, round_relations, selected_rounds
 
 
-def fetch_sessions(season: int, circuit_names_by_round: dict[int, str], now_utc: datetime):
-    schedule = fastf1.get_event_schedule(season, include_testing=False)
+def fetch_sessions(schedule, circuit_names_by_round: dict[int, str], now_utc: datetime):
     schedule, round_relations, selected_rounds = select_relevant_rounds(schedule, now_utc)
     rows = []
     location_by_round: dict[int, str] = {}
@@ -246,6 +245,68 @@ def fetch_sessions(season: int, circuit_names_by_round: dict[int, str], now_utc:
                 "round_relation": round_relations.get(round_no),
             })
     return rows, round_relations, selected_rounds, location_by_round
+
+
+def build_schedule_full(schedule, season: int, now_utc: datetime) -> list[dict]:
+    """
+    Bangun list semua round musim (tidak difilter) untuk tabel schedule_full.
+
+    Fields per baris:
+      season, round, race_name, has_sprint, race_start_utc, sprint_start_utc, status
+
+    has_sprint  = 1 kalau ada label "Sprint" di Session1..Session5, else 0.
+    race_start_utc  = timestamp sesi berlabel "Race" (ISO 8601 UTC), else None.
+    sprint_start_utc = timestamp sesi berlabel "Sprint" (ISO 8601 UTC), else None.
+    status = "completed" kalau race_start_utc + 3 jam < now_utc, else "scheduled".
+    """
+    from datetime import timedelta
+
+    now_naive = now_utc.replace(tzinfo=None)
+    rows = []
+    for _, event in schedule.sort_values("RoundNumber").iterrows():
+        round_no = int(event["RoundNumber"])
+        race_name = str(event["EventName"])
+
+        race_start = None
+        sprint_start = None
+
+        for i in range(1, 6):
+            label = event.get(f"Session{i}")
+            ts = event.get(f"Session{i}DateUtc")
+            if not label or ts is None or str(ts) == "NaT":
+                continue
+            label_str = str(label)
+            if label_str == "Race" and race_start is None:
+                race_start = ts
+            elif label_str == "Sprint" and sprint_start is None:
+                sprint_start = ts
+
+        has_sprint = 1 if sprint_start is not None else 0
+
+        def _fmt(ts):
+            if ts is None:
+                return None
+            return ts.strftime("%Y-%m-%dT%H:%M:%SZ")
+
+        race_start_utc = _fmt(race_start)
+        sprint_start_utc = _fmt(sprint_start)
+
+        if race_start is not None and (race_start + timedelta(hours=3)) < now_naive:
+            status = "completed"
+        else:
+            status = "scheduled"
+
+        rows.append({
+            "season": season,
+            "round": round_no,
+            "race_name": race_name,
+            "has_sprint": has_sprint,
+            "race_start_utc": race_start_utc,
+            "sprint_start_utc": sprint_start_utc,
+            "status": status,
+        })
+
+    return rows
 
 
 # ---------------------------------------------------------------------------
@@ -549,6 +610,17 @@ CREATE TABLE IF NOT EXISTS starting_grid (
   team_name TEXT,
   grid_source TEXT
 );
+
+CREATE TABLE IF NOT EXISTS schedule_full (
+  season INTEGER NOT NULL,
+  round INTEGER NOT NULL,
+  race_name TEXT,
+  has_sprint INTEGER NOT NULL,
+  race_start_utc TEXT,
+  sprint_start_utc TEXT,
+  status TEXT NOT NULL,
+  PRIMARY KEY (season, round)
+);
 """
 
 
@@ -565,7 +637,7 @@ def _migrate_schema(cur: sqlite3.Cursor) -> None:
         cur.execute("ALTER TABLE starting_grid ADD COLUMN grid_source TEXT")
 
 
-def write_to_sqlite(db_path: str, season: int, sessions, driver_rows, constructor_rows, starting_grid_rows):
+def write_to_sqlite(db_path: str, season: int, sessions, driver_rows, constructor_rows, starting_grid_rows, schedule_full_rows):
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
     cur.executescript(SCHEMA_SQL)
@@ -573,6 +645,9 @@ def write_to_sqlite(db_path: str, season: int, sessions, driver_rows, constructo
 
     for table in ("sessions", "driver_standings", "constructor_standings", "starting_grid"):
         cur.execute(f"DELETE FROM {table}")
+
+    # schedule_full: replace per season (picks up corrections & removed rounds)
+    cur.execute("DELETE FROM schedule_full WHERE season = ?", (season,))
 
     cur.executemany(
         "INSERT INTO sessions (round, race_name, session_type, start_time_utc, circuit_name, country_flag, round_relation) "
@@ -593,6 +668,11 @@ def write_to_sqlite(db_path: str, season: int, sessions, driver_rows, constructo
         "INSERT INTO starting_grid (round, round_relation, position, driver_name, driver_abbr, team_name, grid_source) "
         "VALUES (:round, :round_relation, :position, :driver_name, :driver_abbr, :team_name, :grid_source)",
         starting_grid_rows,
+    )
+    cur.executemany(
+        "INSERT INTO schedule_full (season, round, race_name, has_sprint, race_start_utc, sprint_start_utc, status) "
+        "VALUES (:season, :round, :race_name, :has_sprint, :race_start_utc, :sprint_start_utc, :status)",
+        schedule_full_rows,
     )
 
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
@@ -618,40 +698,49 @@ def main():
 
     now_utc = datetime.now(timezone.utc)
 
-    print(f"[1/7] Fetch season schedule {args.season} ...")
+    print(f"[1/8] Fetch season schedule {args.season} ...")
     ergast = Ergast()
+    schedule = fastf1.get_event_schedule(args.season, include_testing=False)
+    print(f"      -> {len(schedule)} round di kalender musim ini")
 
-    print("[2/7] Fetch nama sirkuit resmi per ronde ...")
+    print("[2/8] Fetch nama sirkuit resmi per ronde ...")
     circuit_names_by_round = fetch_circuit_names(ergast, args.season)
 
     sessions, round_relations, selected_rounds, location_by_round = fetch_sessions(
-        args.season, circuit_names_by_round, now_utc
+        schedule, circuit_names_by_round, now_utc
     )
     print(f"      -> {len(sessions)} sesi ditemukan (round before/now/after saja)")
 
-    print("[3/7] Fetch hasil tiap race musim ini (untuk podium & DNF/DNS) ...")
+    print("[3/8] Build schedule_full (semua round musim) ...")
+    schedule_full_rows = build_schedule_full(schedule, args.season, now_utc)
+    sprint_count = sum(r["has_sprint"] for r in schedule_full_rows)
+    completed_count = sum(1 for r in schedule_full_rows if r["status"] == "completed")
+    print(f"      -> {len(schedule_full_rows)} round total, {sprint_count} sprint weekend, {completed_count} completed")
+
+    print("[4/8] Fetch hasil tiap race musim ini (untuk podium & DNF/DNS) ...")
     driver_race_stats, constructor_race_stats = fetch_all_race_results(ergast, args.season)
 
-    print("[4/7] Fetch WDC standing ...")
+    print("[5/8] Fetch WDC standing ...")
     driver_rows = fetch_driver_standings(ergast, args.season, driver_race_stats)
     print(f"      -> {len(driver_rows)} driver")
 
-    print("[5/7] Fetch WCC standing ...")
+    print("[6/8] Fetch WCC standing ...")
     constructor_rows = fetch_constructor_standings(ergast, args.season, constructor_race_stats)
     print(f"      -> {len(constructor_rows)} constructor")
 
-    print("[6/7] Fetch starting grid (OpenF1 actual, fallback Qualifying) round terkait ...")
+    print("[7/8] Fetch starting grid (OpenF1 actual, fallback Qualifying) round terkait ...")
     starting_grid_rows = fetch_starting_grid(
         ergast, args.season, selected_rounds, round_relations, location_by_round
     )
     print(f"      -> {len(starting_grid_rows)} baris starting grid")
 
-    print(f"[7/7] Tulis ke SQLite: {args.output}")
-    write_to_sqlite(args.output, args.season, sessions, driver_rows, constructor_rows, starting_grid_rows)
+    print(f"[8/8] Tulis ke SQLite: {args.output}")
+    write_to_sqlite(args.output, args.season, sessions, driver_rows, constructor_rows, starting_grid_rows, schedule_full_rows)
 
     print()
     print("=== FETCH SELESAI ===")
     print(f"Season         : {args.season}")
+    print(f"Schedule full  : {len(schedule_full_rows)} round ({sprint_count} sprint, {completed_count} completed)")
     print(f"Sessions       : {len(sessions)}")
     print(f"Driver standing: {len(driver_rows)}")
     print(f"Constructor    : {len(constructor_rows)}")

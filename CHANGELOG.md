@@ -7,6 +7,11 @@ Format mengikuti [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- Tabel `schedule_full`: semua round musim (tidak difilter), termasuk field `has_sprint`, `race_start_utc`, `sprint_start_utc`, dan `status` (`completed` / `scheduled`).
+- `build_schedule_full(schedule, season, now_utc)` — membangun baris `schedule_full` dari DataFrame FastF1 schedule tanpa filtering round.
+- `fetch_sessions` sekarang menerima DataFrame schedule yang sudah di-fetch alih-alih memanggil `fastf1.get_event_schedule` sendiri; `main()` fetch schedule sekali dan meneruskannya ke keduanya.
+
 ---
 
 ## [0.1.0] - 2026-10-05
