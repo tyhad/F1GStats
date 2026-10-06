@@ -376,6 +376,104 @@ def fetch_all_race_results(ergast: Ergast, season: int):
 
 
 # ---------------------------------------------------------------------------
+# Fetch: per-round race / sprint results rows  (untuk tabel race_results)
+# ---------------------------------------------------------------------------
+
+# Confirmed Ergast columns (printed once from live API, 2026-10-06):
+#   number, position, positionText, points, grid, laps, status,
+#   driverId, driverNumber, driverCode, driverUrl,
+#   givenName, familyName, dateOfBirth, driverNationality,
+#   constructorId, constructorUrl, constructorName, constructorNationality,
+#   totalRaceTimeMillis, totalRaceTime, fastestLapRank, fastestLapNumber, fastestLapTime
+#
+# resp.description columns (per-round metadata):
+#   season, round, url, raceName, circuitId, circuitUrl, circuitName,
+#   lat, long, locality, country, date, time
+
+def fetch_results_rows(ergast: Ergast, season: int, session: str) -> list[dict]:
+    """
+    Return list[dict] — satu baris per driver per round yang sudah selesai.
+
+    session: "Race" → pakai get_race_results
+             "Sprint" → pakai get_sprint_results (empty content → [], tidak raise)
+
+    Kolom yang di-map (sesuai konfirmasi dari API, lihat komentar di atas):
+      driver_abbr    ← driverCode
+      driver_name    ← givenName + " " + familyName
+      team_name      ← constructorName (via clean_team_name)
+      constructor_id ← constructorId
+      grid           ← grid
+      position       ← position (int jika positionText.isdigit(), else None)
+      position_text  ← positionText
+      points         ← points
+      status         ← status
+      is_classified  ← positionText.isdigit()
+    """
+    if session == "Race":
+        resp = ergast.get_race_results(season=season, limit=2000)
+    elif session == "Sprint":
+        try:
+            resp = ergast.get_sprint_results(season=season, limit=2000)
+        except Exception as exc:
+            print(f"  [WARN] fetch_results_rows Sprint: {exc} — mengembalikan []")
+            return []
+    else:
+        raise ValueError(f"session harus 'Race' atau 'Sprint', bukan {session!r}")
+
+    if not resp.content:
+        return []
+
+    _printed_header = False
+    rows = []
+
+    for round_df, desc_row in zip(resp.content, resp.description.itertuples()):
+        if round_df.empty:
+            continue
+
+        # Print columns + sample row sekali saja (sesuai aturan AGENTS.md)
+        if not _printed_header:
+            print(f"  [DEBUG] {session} resp.description columns: {list(resp.description.columns)}")
+            print(f"  [DEBUG] {session} result df.columns: {round_df.columns.tolist()}")
+            print(f"  [DEBUG] sample row: {round_df.iloc[0].to_dict()}")
+            _printed_header = True
+
+        round_no = int(desc_row.round)
+
+        for _, r in round_df.iterrows():
+            abbr = str(r.get("driverCode") or r.get("familyName") or "")
+            given = str(r.get("givenName", "") or "")
+            family = str(r.get("familyName", "") or "")
+            driver_name = f"{given} {family}".strip()
+            team_name = clean_team_name(str(r.get("constructorName", "") or ""))
+            constructor_id = str(r.get("constructorId", "") or "")
+            grid = r.get("grid")
+            grid = int(grid) if grid is not None and str(grid) not in ("", "nan") else None
+            pos_text = str(r.get("positionText", r.get("position", "")) or "").strip()
+            is_classified = 1 if pos_text.isdigit() else 0
+            position = int(pos_text) if is_classified else None
+            points = float(r.get("points", 0) or 0)
+            status = str(r.get("status", "") or "")
+
+            rows.append({
+                "season": season,
+                "round": round_no,
+                "session": session,
+                "driver_abbr": abbr,
+                "driver_name": driver_name,
+                "team_name": team_name,
+                "constructor_id": constructor_id,
+                "grid": grid,
+                "position": position,
+                "position_text": pos_text,
+                "points": points,
+                "status": status,
+                "is_classified": is_classified,
+            })
+
+    return rows
+
+
+# ---------------------------------------------------------------------------
 # Fetch: starting grid ACTUAL via OpenF1 (post-penalty), fallback Qualifying
 # ---------------------------------------------------------------------------
 
@@ -621,6 +719,23 @@ CREATE TABLE IF NOT EXISTS schedule_full (
   status TEXT NOT NULL,
   PRIMARY KEY (season, round)
 );
+
+CREATE TABLE IF NOT EXISTS race_results (
+  season INTEGER NOT NULL,
+  round INTEGER NOT NULL,
+  session TEXT NOT NULL,
+  driver_abbr TEXT NOT NULL,
+  driver_name TEXT,
+  team_name TEXT,
+  constructor_id TEXT,
+  grid INTEGER,
+  position INTEGER,
+  position_text TEXT,
+  points REAL NOT NULL,
+  status TEXT,
+  is_classified INTEGER NOT NULL,
+  PRIMARY KEY (season, round, session, driver_abbr)
+);
 """
 
 
@@ -637,7 +752,7 @@ def _migrate_schema(cur: sqlite3.Cursor) -> None:
         cur.execute("ALTER TABLE starting_grid ADD COLUMN grid_source TEXT")
 
 
-def write_to_sqlite(db_path: str, season: int, sessions, driver_rows, constructor_rows, starting_grid_rows, schedule_full_rows):
+def write_to_sqlite(db_path: str, season: int, sessions, driver_rows, constructor_rows, starting_grid_rows, schedule_full_rows, race_results_rows):
     conn = sqlite3.connect(db_path)
     cur = conn.cursor()
     cur.executescript(SCHEMA_SQL)
@@ -646,8 +761,9 @@ def write_to_sqlite(db_path: str, season: int, sessions, driver_rows, constructo
     for table in ("sessions", "driver_standings", "constructor_standings", "starting_grid"):
         cur.execute(f"DELETE FROM {table}")
 
-    # schedule_full: replace per season (picks up corrections & removed rounds)
+    # schedule_full + race_results: replace per season
     cur.execute("DELETE FROM schedule_full WHERE season = ?", (season,))
+    cur.execute("DELETE FROM race_results WHERE season = ?", (season,))
 
     cur.executemany(
         "INSERT INTO sessions (round, race_name, session_type, start_time_utc, circuit_name, country_flag, round_relation) "
@@ -674,6 +790,14 @@ def write_to_sqlite(db_path: str, season: int, sessions, driver_rows, constructo
         "VALUES (:season, :round, :race_name, :has_sprint, :race_start_utc, :sprint_start_utc, :status)",
         schedule_full_rows,
     )
+    cur.executemany(
+        "INSERT INTO race_results "
+        "(season, round, session, driver_abbr, driver_name, team_name, constructor_id, "
+        "grid, position, position_text, points, status, is_classified) "
+        "VALUES (:season, :round, :session, :driver_abbr, :driver_name, :team_name, :constructor_id, "
+        ":grid, :position, :position_text, :points, :status, :is_classified)",
+        race_results_rows,
+    )
 
     now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
     cur.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('season', ?)", (str(season),))
@@ -698,12 +822,12 @@ def main():
 
     now_utc = datetime.now(timezone.utc)
 
-    print(f"[1/8] Fetch season schedule {args.season} ...")
+    print(f"[1/9] Fetch season schedule {args.season} ...")
     ergast = Ergast()
     schedule = fastf1.get_event_schedule(args.season, include_testing=False)
     print(f"      -> {len(schedule)} round di kalender musim ini")
 
-    print("[2/8] Fetch nama sirkuit resmi per ronde ...")
+    print("[2/9] Fetch nama sirkuit resmi per ronde ...")
     circuit_names_by_round = fetch_circuit_names(ergast, args.season)
 
     sessions, round_relations, selected_rounds, location_by_round = fetch_sessions(
@@ -711,36 +835,46 @@ def main():
     )
     print(f"      -> {len(sessions)} sesi ditemukan (round before/now/after saja)")
 
-    print("[3/8] Build schedule_full (semua round musim) ...")
+    print("[3/9] Build schedule_full (semua round musim) ...")
     schedule_full_rows = build_schedule_full(schedule, args.season, now_utc)
     sprint_count = sum(r["has_sprint"] for r in schedule_full_rows)
     completed_count = sum(1 for r in schedule_full_rows if r["status"] == "completed")
     print(f"      -> {len(schedule_full_rows)} round total, {sprint_count} sprint weekend, {completed_count} completed")
 
-    print("[4/8] Fetch hasil tiap race musim ini (untuk podium & DNF/DNS) ...")
+    print("[4/9] Fetch hasil tiap race musim ini (untuk podium & DNF/DNS) ...")
     driver_race_stats, constructor_race_stats = fetch_all_race_results(ergast, args.season)
 
-    print("[5/8] Fetch WDC standing ...")
+    print("[5/9] Fetch race_results (Grand Prix, per driver per round) ...")
+    race_results_rows = fetch_results_rows(ergast, args.season, "Race")
+    gp_rounds = len({r["round"] for r in race_results_rows})
+    print(f"      -> {len(race_results_rows)} baris ({gp_rounds} round GP)")
+
+    print("[6/9] Fetch WDC standing ...")
     driver_rows = fetch_driver_standings(ergast, args.season, driver_race_stats)
     print(f"      -> {len(driver_rows)} driver")
 
-    print("[6/8] Fetch WCC standing ...")
+    print("[7/9] Fetch WCC standing ...")
     constructor_rows = fetch_constructor_standings(ergast, args.season, constructor_race_stats)
     print(f"      -> {len(constructor_rows)} constructor")
 
-    print("[7/8] Fetch starting grid (OpenF1 actual, fallback Qualifying) round terkait ...")
+    print("[8/9] Fetch starting grid (OpenF1 actual, fallback Qualifying) round terkait ...")
     starting_grid_rows = fetch_starting_grid(
         ergast, args.season, selected_rounds, round_relations, location_by_round
     )
     print(f"      -> {len(starting_grid_rows)} baris starting grid")
 
-    print(f"[8/8] Tulis ke SQLite: {args.output}")
-    write_to_sqlite(args.output, args.season, sessions, driver_rows, constructor_rows, starting_grid_rows, schedule_full_rows)
+    print(f"[9/9] Tulis ke SQLite: {args.output}")
+    write_to_sqlite(
+        args.output, args.season,
+        sessions, driver_rows, constructor_rows, starting_grid_rows,
+        schedule_full_rows, race_results_rows,
+    )
 
     print()
     print("=== FETCH SELESAI ===")
     print(f"Season         : {args.season}")
     print(f"Schedule full  : {len(schedule_full_rows)} round ({sprint_count} sprint, {completed_count} completed)")
+    print(f"Race results   : {len(race_results_rows)} baris ({gp_rounds} round GP)")
     print(f"Sessions       : {len(sessions)}")
     print(f"Driver standing: {len(driver_rows)}")
     print(f"Constructor    : {len(constructor_rows)}")

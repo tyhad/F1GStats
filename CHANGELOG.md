@@ -11,6 +11,8 @@ Format mengikuti [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Tabel `schedule_full`: semua round musim (tidak difilter), termasuk field `has_sprint`, `race_start_utc`, `sprint_start_utc`, dan `status` (`completed` / `scheduled`).
 - `build_schedule_full(schedule, season, now_utc)` — membangun baris `schedule_full` dari DataFrame FastF1 schedule tanpa filtering round.
 - `fetch_sessions` sekarang menerima DataFrame schedule yang sudah di-fetch alih-alih memanggil `fastf1.get_event_schedule` sendiri; `main()` fetch schedule sekali dan meneruskannya ke keduanya.
+- Tabel `race_results`: satu baris per driver per round GP yang sudah selesai, dengan field `season, round, session, driver_abbr, driver_name, team_name, constructor_id, grid, position, position_text, points, status, is_classified`.
+- `fetch_results_rows(ergast, season, session)` — mengambil hasil GP (`"Race"`) dari Ergast per round, memetakan kolom API yang sudah dikonfirmasi, dan mengembalikan `list[dict]`.
 
 ---
 
