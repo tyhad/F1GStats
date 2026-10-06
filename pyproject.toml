@@ -22,4 +22,4 @@ Issues = "https://github.com/tyhad/F1GStats/issues"
 f1gstats = "fetch_f1_data:main"
 
 [tool.setuptools]
-py-modules = ["fetch_f1_data"]
+py-modules = ["fetch_f1_data", "validation"]

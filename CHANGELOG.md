@@ -18,15 +18,22 @@ Format mengikuti [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `tests/test_fetch_results_rows.py`: tes offline (mock `Ergast._get`) untuk mapping Race/Sprint.
 - `meta.schema_version = '2'` ditulis setiap run (skema Phase 0). Konsumen mengecek nilai ini saat membuka database.
 - `tests/test_write_to_sqlite.py`: tes offline untuk replace per season, run dua kali, rollback saat error, dan `schema_version`.
+- `validation.py` (modul murni, tanpa network/FastF1): `run_checks(driver_rows, constructor_rows, race_results_rows, schedule_full_rows)` mengembalikan status keseluruhan (`ok` / `warn` / `fail`) dan daftar `{id, status, message}` untuk V1-V6 sesuai `docs/DATA_CONTRACT.md`.
+- Tabel `data_health` (`id, season, checked_at, status, details_json`): satu baris per run.
+- Gerbang validasi di `main()` (langkah `[10/11]`): `fail` -> tabel data tidak disentuh, `data_health` dicatat dalam transaksi kecil sendiri, exit code `2`. `ok`/`warn` -> data dan `data_health` ditulis dalam satu transaksi, exit code `0`.
+- `write_data_health` dan `write_or_reject` di `fetch_f1_data.py`; `write_to_sqlite` menerima argumen opsional `health`.
+- Tes: `tests/test_validation.py` (V1-V6), gerbang dan `data_health` di `tests/test_write_to_sqlite.py`, dan `tests/test_main_gate.py` (end-to-end `main()` dengan fetch di-mock; exit code 2 dan data lama tetap).
+- `validation` ditambahkan ke `py-modules` di `pyproject.toml` agar perintah `f1gstats` hasil instalasi bisa meng-import-nya.
 
 ### Changed
 - `fetch_results_rows`: error sungguhan saat fetch Sprint (jaringan/HTTP/JSON) tidak lagi ditelan dan dikembalikan sebagai `[]`; error naik ke `__main__`. Hanya respons kosong yang menjadi `[]`.
-- Label progres di `main()` jadi `[x/10]`.
+- Label progres di `main()` jadi `[x/11]` (langkah validasi ditambahkan).
 - `write_to_sqlite`: seluruh penulisan data kini satu transaksi eksplisit (`BEGIN` ... `commit`). Error apa pun -> `rollback()`, koneksi ditutup, exception dilempar ulang, sehingga tabel tidak berubah. `__main__` mencetak error ke stderr dan `sys.exit(1)`.
 - `schedule_full` dan `race_results` diganti per season (replace, bukan upsert). Pembuatan tabel/migrasi kolom tetap idempotent dan berjalan sebelum transaksi data.
 - README: catatan "Re-run" diperbarui; `schema_version` ditambahkan ke deskripsi tabel `meta`.
 
 ### Fixed
+- `race_results.position` sekarang diisi dari kolom API `position` (urutan akhir) untuk semua baris, termasuk pembalap tidak terklasifikasi (`R`, `D`, dst.). Sebelumnya `NULL` untuk mereka, yang melanggar V5 (`position` tidak boleh null). `is_classified` tetap dari `positionText`. **Perubahan nilai pada data Step 3/4.**
 - `fetch_all_race_results`: sekarang mengambil semua halaman hasil (helper `_iter_result_pages`). Sebelumnya hanya 100 baris pertama (~4-5 round) yang dihitung karena Jolpica membatasi respons dan `limit=2000` dipotong diam-diam, sehingga `podiums` dan `dnf_dns` di `driver_standings` dan `constructor_standings` terlalu kecil. Struktur tabel dan kolom tidak berubah; hanya nilainya yang jadi benar.
 - `fetch_results_rows`: sekarang mengambil semua halaman hasil (`get_next_result_page`). Jolpica membatasi respons ke 100 baris dan diam-diam memotong `limit=2000`, sehingga sebelumnya hanya ~5 round pertama yang tersimpan. Mencetak `total_results` dan memberi `[WARN]` bila jumlah baris terbaca tidak sama dengan total dari API.
 

@@ -25,6 +25,7 @@ Penggunaan
 """
 
 import argparse
+import json
 import os
 import re
 import sqlite3
@@ -34,6 +35,8 @@ from datetime import datetime, timezone
 import fastf1
 import requests
 from fastf1.ergast import Ergast
+
+from validation import run_checks
 
 # ---------------------------------------------------------------------------
 # Konversi negara -> emoji flag
@@ -423,7 +426,7 @@ def fetch_results_rows(ergast: Ergast, season: int, session: str) -> list[dict]:
       team_name      ← constructorName (via clean_team_name)
       constructor_id ← constructorId
       grid           ← grid
-      position       ← position (int jika positionText.isdigit(), else None)
+      position       ← position (urutan akhir dari API; terisi juga untuk R/D/dst.)
       position_text  ← positionText
       points         ← points
       status         ← status
@@ -472,7 +475,11 @@ def fetch_results_rows(ergast: Ergast, season: int, session: str) -> list[dict]:
                 grid = int(grid) if grid is not None and str(grid) not in ("", "nan") else None
                 pos_text = str(r.get("positionText", r.get("position", "")) or "").strip()
                 is_classified = 1 if pos_text.isdigit() else 0
-                position = int(pos_text) if is_classified else None
+                raw_pos = r.get("position")
+                if raw_pos is None or str(raw_pos) in ("", "nan", "<NA>"):
+                    position = None  # V5 akan menggagalkan run kalau API benar-benar tidak mengisi
+                else:
+                    position = int(raw_pos)
                 points = float(r.get("points", 0) or 0)
                 status = str(r.get("status", "") or "")
 
@@ -765,6 +772,14 @@ CREATE TABLE IF NOT EXISTS race_results (
   is_classified INTEGER NOT NULL,
   PRIMARY KEY (season, round, session, driver_abbr)
 );
+
+CREATE TABLE IF NOT EXISTS data_health (
+  id INTEGER PRIMARY KEY AUTOINCREMENT,
+  season INTEGER NOT NULL,
+  checked_at TEXT NOT NULL,
+  status TEXT NOT NULL,
+  details_json TEXT NOT NULL
+);
 """
 
 
@@ -784,7 +799,7 @@ def _migrate_schema(cur: sqlite3.Cursor) -> None:
 SCHEMA_VERSION = "2"
 
 
-def write_to_sqlite(db_path: str, season: int, sessions, driver_rows, constructor_rows, starting_grid_rows, schedule_full_rows, race_results_rows):
+def write_to_sqlite(db_path: str, season: int, sessions, driver_rows, constructor_rows, starting_grid_rows, schedule_full_rows, race_results_rows, health=None):
     """
     Tulis semua tabel data dalam SATU transaksi SQLite. Error apa pun -> rollback
     (tabel tetap seperti sebelumnya), koneksi ditutup, lalu exception dilempar ulang.
@@ -794,6 +809,9 @@ def write_to_sqlite(db_path: str, season: int, sessions, driver_rows, constructo
     - schedule_full / race_results: DIGANTI per season (DELETE ... WHERE season = ?
       lalu INSERT), bukan upsert. Satu musim datang dalam satu panggilan API, jadi
       mengganti juga membawa koreksi pasca-race dan baris yang dihapus.
+
+    health: (status, details) dari validation.run_checks. Kalau diberikan, satu baris
+    data_health ditulis di transaksi yang SAMA dengan data (ok/warn).
 
     Pembuatan tabel (CREATE TABLE IF NOT EXISTS) dan migrasi kolom dijalankan
     sebelum transaksi data; keduanya idempotent dan tidak menyentuh data.
@@ -852,13 +870,57 @@ def write_to_sqlite(db_path: str, season: int, sessions, driver_rows, constructo
         cur.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('season', ?)", (str(season),))
         cur.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('last_fetched_at', ?)", (now_iso,))
         cur.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)", (SCHEMA_VERSION,))
-        
+
+        if health is not None:
+            _insert_data_health(cur, season, health[0], health[1], now_iso)
+
         conn.commit()
     except BaseException:
         conn.rollback()
         raise
     finally:
         conn.close()
+
+
+def _insert_data_health(cur: sqlite3.Cursor, season: int, status: str, details: list[dict], checked_at: str) -> None:
+    cur.execute(
+        "INSERT INTO data_health (season, checked_at, status, details_json) VALUES (?, ?, ?, ?)",
+        (season, checked_at, status, json.dumps(details, ensure_ascii=False)),
+    )
+
+
+def write_data_health(db_path: str, season: int, status: str, details: list[dict]) -> None:
+    """Catat satu baris data_health dalam transaksi kecilnya sendiri (dipakai saat validasi fail)."""
+    conn = sqlite3.connect(db_path)
+    try:
+        cur = conn.cursor()
+        cur.executescript(SCHEMA_SQL)
+        _migrate_schema(cur)
+        conn.commit()
+
+        cur.execute("BEGIN")
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        _insert_data_health(cur, season, status, details, now_iso)
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
+
+
+def write_or_reject(db_path: str, season: int, payload: dict, health_status: str, details: list[dict]) -> int:
+    """
+    Gerbang validasi. Return exit code.
+      fail    -> tabel data TIDAK disentuh; hanya data_health yang dicatat; return 2.
+      ok/warn -> data + data_health ditulis dalam satu transaksi; return 0.
+    payload: kwargs untuk write_to_sqlite selain db_path, season, health.
+    """
+    if health_status == "fail":
+        write_data_health(db_path, season, health_status, details)
+        return 2
+    write_to_sqlite(db_path, season, **payload, health=(health_status, details))
+    return 0
 
 
 # ---------------------------------------------------------------------------
@@ -876,12 +938,12 @@ def main():
 
     now_utc = datetime.now(timezone.utc)
 
-    print(f"[1/10] Fetch season schedule {args.season} ...")
+    print(f"[1/11] Fetch season schedule {args.season} ...")
     ergast = Ergast()
     schedule = fastf1.get_event_schedule(args.season, include_testing=False)
     print(f"      -> {len(schedule)} round di kalender musim ini")
 
-    print("[2/10] Fetch nama sirkuit resmi per ronde ...")
+    print("[2/11] Fetch nama sirkuit resmi per ronde ...")
     circuit_names_by_round = fetch_circuit_names(ergast, args.season)
 
     sessions, round_relations, selected_rounds, location_by_round = fetch_sessions(
@@ -889,21 +951,21 @@ def main():
     )
     print(f"      -> {len(sessions)} sesi ditemukan (round before/now/after saja)")
 
-    print("[3/10] Build schedule_full (semua round musim) ...")
+    print("[3/11] Build schedule_full (semua round musim) ...")
     schedule_full_rows = build_schedule_full(schedule, args.season, now_utc)
     sprint_count = sum(r["has_sprint"] for r in schedule_full_rows)
     completed_count = sum(1 for r in schedule_full_rows if r["status"] == "completed")
     print(f"      -> {len(schedule_full_rows)} round total, {sprint_count} sprint weekend, {completed_count} completed")
 
-    print("[4/10] Fetch hasil tiap race musim ini (untuk podium & DNF/DNS) ...")
+    print("[4/11] Fetch hasil tiap race musim ini (untuk podium & DNF/DNS) ...")
     driver_race_stats, constructor_race_stats = fetch_all_race_results(ergast, args.season)
 
-    print("[5/10] Fetch race_results (Grand Prix, per driver per round) ...")
+    print("[5/11] Fetch race_results (Grand Prix, per driver per round) ...")
     race_results_rows = fetch_results_rows(ergast, args.season, "Race")
     gp_rounds = len({r["round"] for r in race_results_rows})
     print(f"      -> {len(race_results_rows)} baris ({gp_rounds} round GP)")
 
-    print("[6/10] Fetch race_results (Sprint, per driver per round) ...")
+    print("[6/11] Fetch race_results (Sprint, per driver per round) ...")
     sprint_rows = fetch_results_rows(ergast, args.season, "Sprint")
     sprint_rounds = {r["round"] for r in sprint_rows}
     print(f"      -> {len(sprint_rows)} baris ({len(sprint_rounds)} round sprint)")
@@ -914,26 +976,43 @@ def main():
         print(f"      [WARN] round {unexpected} punya hasil sprint tapi has_sprint=0 di schedule_full")
     race_results_rows = race_results_rows + sprint_rows
 
-    print("[7/10] Fetch WDC standing ...")
+    print("[7/11] Fetch WDC standing ...")
     driver_rows = fetch_driver_standings(ergast, args.season, driver_race_stats)
     print(f"      -> {len(driver_rows)} driver")
 
-    print("[8/10] Fetch WCC standing ...")
+    print("[8/11] Fetch WCC standing ...")
     constructor_rows = fetch_constructor_standings(ergast, args.season, constructor_race_stats)
     print(f"      -> {len(constructor_rows)} constructor")
 
-    print("[9/10] Fetch starting grid (OpenF1 actual, fallback Qualifying) round terkait ...")
+    print("[9/11] Fetch starting grid (OpenF1 actual, fallback Qualifying) round terkait ...")
     starting_grid_rows = fetch_starting_grid(
         ergast, args.season, selected_rounds, round_relations, location_by_round
     )
     print(f"      -> {len(starting_grid_rows)} baris starting grid")
 
-    print(f"[10/10] Tulis ke SQLite: {args.output}")
-    write_to_sqlite(
-        args.output, args.season,
-        sessions, driver_rows, constructor_rows, starting_grid_rows,
-        schedule_full_rows, race_results_rows,
+    print("[10/11] Validasi data (V1-V6) ...")
+    health_status, health_details = run_checks(
+        driver_rows, constructor_rows, race_results_rows, schedule_full_rows
     )
+
+    for d in health_details:
+        print(f"      {d['id']} [{d['status']}] {d['message']}")
+    print(f"      -> status keseluruhan: {health_status}")
+
+    print(f"[11/11] Tulis ke SQLite: {args.output}")
+    exit_code = write_or_reject(
+        args.output, args.season,
+        dict(
+            sessions=sessions, driver_rows=driver_rows, constructor_rows=constructor_rows,
+            starting_grid_rows=starting_grid_rows, schedule_full_rows=schedule_full_rows,
+            race_results_rows=race_results_rows,
+        ),
+        health_status, health_details,
+    )
+    if exit_code == 2:
+        print("\n[FAIL] Validasi gagal: tabel data TIDAK diubah, data_health dicatat. "
+              "Lihat pesan V1-V6 di atas.", file=sys.stderr)
+        sys.exit(2)
 
     print()
     print("=== FETCH SELESAI ===")
@@ -945,6 +1024,7 @@ def main():
     print(f"Driver standing: {len(driver_rows)}")
     print(f"Constructor    : {len(constructor_rows)}")
     print(f"Starting grid  : {len(starting_grid_rows)}")
+    print(f"Data health    : {health_status}")
     print(f"Output file    : {args.output}")
 
 

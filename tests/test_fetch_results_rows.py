@@ -65,8 +65,8 @@ def test_sprint_rows_mapped_per_round():
     assert nor["position"] == 1 and nor["is_classified"] == 1 and nor["points"] == 8.0
     assert nor["constructor_id"] == "mclaren" and nor["team_name"] == "McLaren"
 
-    ham = rows[2]  # tidak diklasifikasi
-    assert ham["position"] is None and ham["is_classified"] == 0
+    ham = rows[2]  # tidak diklasifikasi: position tetap dari API (V5), is_classified dari positionText
+    assert ham["position"] == 3 and ham["is_classified"] == 0
     assert ham["position_text"] == "R" and ham["points"] == 0.0
 
 

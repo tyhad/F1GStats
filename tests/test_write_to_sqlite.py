@@ -7,7 +7,7 @@ import fetch_f1_data as f
 
 TABLES = (
     "meta", "sessions", "driver_standings", "constructor_standings",
-    "starting_grid", "schedule_full", "race_results",
+    "starting_grid", "schedule_full", "race_results", "data_health",
 )
 
 
@@ -112,3 +112,90 @@ def test_error_midway_rolls_back_everything(tmp_path):
         f.write_to_sqlite(db, **bad)
 
     assert _snapshot(db) == before  # semua tabel + meta (termasuk last_fetched_at) tak berubah
+
+
+# --- data_health + gerbang validasi -------------------------------------------------
+
+DETAILS_OK = [{"id": "V1", "status": "ok", "message": "fine"}]
+DETAILS_FAIL = [{"id": "V3", "status": "fail", "message": "ANT: hasil 1 vs standings 2"}]
+
+
+def _split(payload):
+    payload = dict(payload)
+    return payload.pop("season"), payload
+
+
+def _health_rows(db):
+    conn = sqlite3.connect(db)
+    try:
+        return conn.execute("SELECT season, status, details_json FROM data_health ORDER BY id").fetchall()
+    finally:
+        conn.close()
+
+
+def test_ok_writes_data_and_health_in_same_run(tmp_path):
+    import json
+    db = str(tmp_path / "x.sqlite")
+    season, payload = _split(_payload())
+    assert f.write_or_reject(db, season, payload, "ok", DETAILS_OK) == 0
+    assert _counts(db)["race_results"] == 4
+    rows = _health_rows(db)
+    assert len(rows) == 1 and rows[0][:2] == (2026, "ok")
+    assert json.loads(rows[0][2]) == DETAILS_OK
+
+
+def test_warn_still_writes_data(tmp_path):
+    db = str(tmp_path / "x.sqlite")
+    season, payload = _split(_payload())
+    assert f.write_or_reject(db, season, payload, "warn", DETAILS_OK) == 0
+    assert _counts(db)["race_results"] == 4
+    assert _health_rows(db)[0][1] == "warn"
+
+
+def test_fail_leaves_data_tables_untouched_and_returns_2(tmp_path):
+    db = str(tmp_path / "x.sqlite")
+    _write(db, n_rounds=2)
+    before = _snapshot(db)
+    before.pop("meta")  # last_fetched_at tidak boleh berubah juga; dicek terpisah di bawah
+    meta_before = _snapshot(db)["meta"]
+
+    season, payload = _split(_payload(n_rounds=5, drivers=("XXX", "YYY", "ZZZ")))
+    assert f.write_or_reject(db, season, payload, "fail", DETAILS_FAIL) == 2
+
+    after = _snapshot(db)
+    assert after.pop("meta") == meta_before
+    after.pop("data_health", None)
+    before.pop("data_health", None)
+    assert after == before
+    rows = _health_rows(db)
+    assert len(rows) == 1 and rows[0][1] == "fail"
+
+
+def test_fail_on_fresh_database_creates_only_health_row(tmp_path):
+    db = str(tmp_path / "fresh.sqlite")
+    season, payload = _split(_payload())
+    assert f.write_or_reject(db, season, payload, "fail", DETAILS_FAIL) == 2
+    counts = _counts(db)
+    assert counts["race_results"] == 0 and counts["driver_standings"] == 0
+    assert len(_health_rows(db)) == 1
+
+
+def test_each_run_adds_one_health_row(tmp_path):
+    db = str(tmp_path / "x.sqlite")
+    season, payload = _split(_payload())
+    f.write_or_reject(db, season, payload, "ok", DETAILS_OK)
+    f.write_or_reject(db, season, payload, "warn", DETAILS_OK)
+    f.write_or_reject(db, season, payload, "fail", DETAILS_FAIL)
+    assert [r[1] for r in _health_rows(db)] == ["ok", "warn", "fail"]
+
+
+def test_error_after_health_insert_rolls_back_health_too(tmp_path):
+    db = str(tmp_path / "x.sqlite")
+    _write(db)
+    before_health = _health_rows(db)
+    bad = _payload(n_rounds=3)
+    bad["race_results_rows"] = bad["race_results_rows"] + [bad["race_results_rows"][0]]  # PK ganda
+    season = bad.pop("season")
+    with pytest.raises(sqlite3.IntegrityError):
+        f.write_or_reject(db, season, bad, "ok", DETAILS_OK)
+    assert _health_rows(db) == before_health
