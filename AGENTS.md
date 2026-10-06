@@ -7,7 +7,7 @@ validates the data, and writes `f1gstats.sqlite`. Two consumers read that file:
 - To the Flag (new tables from Phase 0; separate repo, read-only)
 
 ## Commands (Windows / PowerShell)
-- Setup: `py -m venv .venv`, then `.venv\Scripts\activate`, then `pip install -r requirements.txt -r requirements-dev.txt`
+- Setup: `py -m venv venv`, then `venv\Scripts\activate`, then `pip install -r requirements.txt -r requirements-dev.txt`
 - Run: `py fetch_f1_data.py --season 2026 --output ./f1gstats.sqlite`
 - Test: `pytest`
 
@@ -22,6 +22,8 @@ If code and documents disagree, follow the documents and ask the owner.
 - `validation.py`: pure checks, no network and no FastF1 import (new in Phase 0)
 - `tests/`: pytest; fixtures only, never the network
 - `docs/`: contract and task list
+- `pyproject.toml`: packaging; every new module must be added to `py-modules`
+- `CHANGELOG.md`, `README.md`: keep in sync with behavior changes
 
 ## Hard rules
 - Do not rename, drop, or change existing tables and columns. LiveOverlay depends on them. Only add.
@@ -36,5 +38,6 @@ If code and documents disagree, follow the documents and ask the owner.
 ## How to work
 - Branch `phase-0-data`. One commit per step in `docs/PHASE_0.md`, with a clear message.
 - After each step: run the fetcher, run the check described in the step, then commit.
+- Update `CHANGELOG.md` for every user-visible change (new tables, exit codes) and fix README notes that become stale (for example the "Re-run" note).
 - Write tests for validation before the validation code.
 - Run `pytest` before saying "done". If a rule is ambiguous, ask the owner.

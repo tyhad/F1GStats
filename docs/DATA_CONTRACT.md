@@ -18,6 +18,8 @@
 | `constructor_standings` | `position, team_name, points, wins, podiums, dnf_dns` |
 | `starting_grid` | `round, round_relation, position, driver_name, driver_abbr, team_name, grid_source` |
 
+`sessions`, `driver_standings`, `constructor_standings`, and `starting_grid` also have an `id INTEGER PRIMARY KEY` column (see README). Leave it as is.
+
 ## 2. New tables (Phase 0)
 
 ```sql

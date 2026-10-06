@@ -1,7 +1,7 @@
 # Phase 0: Data tasks
 
 Branch: `phase-0-data`. One commit per step. After each step: run the fetcher, run the check, commit.
-Step 1 (baseline) is done. Read `docs/DATA_CONTRACT.md` first.
+Step 1 (baseline) is done. Read `docs/DATA_CONTRACT.md` first. Add a `CHANGELOG.md` entry with each commit that changes behavior.
 
 ## What the current code does (do not guess)
 
@@ -9,6 +9,18 @@ Step 1 (baseline) is done. Read `docs/DATA_CONTRACT.md` first.
 - `fetch_all_race_results` makes one Ergast call (`limit=2000`) and returns only aggregates (podiums, dnf_dns). It does not keep per-round rows.
 - `write_to_sqlite` already uses one connection: `DELETE` then `INSERT`, then `commit()`.
 - `__main__` prints errors but exits with code 0.
+
+---
+
+## Step 1b: fix `pyproject.toml`
+
+**Goal:** make the package installable.
+
+**Change:** `build-backend = "setuptools.backends.legacy:build"` is not a valid backend (that module does not exist). Use `build-backend = "setuptools.build_meta"`.
+
+**Check:** `pip install -e .` succeeds, then `f1gstats --help` prints the usage.
+
+**Commit:** `fix: use a valid setuptools build backend`
 
 ---
 
@@ -67,6 +79,7 @@ Each round has one row per driver; full races sum to 101.
 - In `write_to_sqlite`, inside the existing transaction: `DELETE FROM schedule_full WHERE season = ?` and `DELETE FROM race_results WHERE season = ?`, then insert. Set `meta.schema_version = '2'`.
 - Wrap in `try/except`: on error `conn.rollback()`, close, re-raise.
 - In `__main__`: on exception print to stderr and `sys.exit(1)`.
+- Update the README note "Re-run" (it still says all tables are deleted and refilled).
 - Replace, do not upsert: the whole season arrives in one call, so replacing picks up corrections and removed rows.
 
 **Check:**
@@ -86,7 +99,9 @@ Each round has one row per driver; full races sum to 101.
   - `fail`: do not write data tables. Insert one `data_health` row in its own small transaction, print the summary, `sys.exit(2)`.
   - `ok` / `warn`: write data and insert the `data_health` row in the same transaction.
 - Tests in `tests/test_validation.py` with small hand-made fixtures: ok case; V1 mismatch → warn; V2 shortened-race total 79 → ok; V3 mismatch → fail; V4 missing round → fail; V5 bad abbreviation → fail.
-- Add `requirements-dev.txt` with `pytest`.
+- Add `requirements-dev.txt` (repo root) with `pytest`.
+- Add `validation` to `py-modules` in `pyproject.toml`; otherwise the installed `f1gstats` command cannot import it.
+- Update `CHANGELOG.md`.
 
 **Check:** `pytest` passes. End-to-end: temporarily force `run_checks` to return fail; the data tables keep their old row counts and the exit code is `2`.
 

@@ -17,6 +17,7 @@ venv/
 .venv/
 env/
 .env/
+.env
 
 # =============================================================================
 # F1GStats – local data (jangan di-commit ke repo)
@@ -28,6 +29,8 @@ env/
 # SQLite output files (data lokal, di-generate saat runtime)
 *.sqlite
 *.db
+*.sqlite3
+.pytest_cache/
 
 # =============================================================================
 # Tools & IDE
