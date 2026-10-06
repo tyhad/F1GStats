@@ -98,7 +98,7 @@ Output file    : ./f1gstats.sqlite
 ### `meta`
 | Kolom | Tipe | Keterangan |
 |-------|------|------------|
-| `key` | TEXT | Nama kunci (`season`, `last_fetched_at`) |
+| `key` | TEXT | Nama kunci (`season`, `last_fetched_at`, `schema_version`) |
 | `value` | TEXT | Nilai |
 
 ### `sessions`
@@ -171,4 +171,5 @@ Script secara otomatis membuat direktori `.fastf1_cache/` di folder project untu
 
 - **`round_relation`**: Script hanya menyimpan data untuk 2–3 round (previous, now, next). Data round lain tidak disimpan ke SQLite.
 - **`grid_source`**: Field ini menunjukkan apakah starting grid untuk suatu round berasal dari OpenF1 (actual, sudah termasuk grid penalty) atau dari hasil Qualifying via Ergast (fallback, belum termasuk grid penalty). Cek field ini untuk mengetahui akurasi data grid tiap round.
-- **Re-run**: Setiap kali script dijalankan, semua tabel (kecuali `meta`) dihapus dan diisi ulang dengan data terbaru.
+- **Re-run**: Setiap kali script dijalankan, semua tabel data ditulis ulang dalam **satu transaksi SQLite**. `sessions`, `driver_standings`, `constructor_standings`, dan `starting_grid` dikosongkan lalu diisi ulang. `schedule_full` dan `race_results` **diganti per season** (`DELETE ... WHERE season = ?` lalu insert, bukan upsert), sehingga data season lain tidak tersentuh dan koreksi pasca-race ikut masuk. `meta` di-update (`season`, `last_fetched_at`, `schema_version`).
+- **Gagal = database tidak berubah**: kalau terjadi error saat menulis, transaksi di-rollback dan semua tabel tetap seperti sebelumnya. Proses keluar dengan exit code `1` (cek `echo %ERRORLEVEL%` di cmd atau `echo $LASTEXITCODE` di PowerShell).

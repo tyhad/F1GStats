@@ -781,59 +781,84 @@ def _migrate_schema(cur: sqlite3.Cursor) -> None:
         cur.execute("ALTER TABLE starting_grid ADD COLUMN grid_source TEXT")
 
 
+SCHEMA_VERSION = "2"
+
+
 def write_to_sqlite(db_path: str, season: int, sessions, driver_rows, constructor_rows, starting_grid_rows, schedule_full_rows, race_results_rows):
+    """
+    Tulis semua tabel data dalam SATU transaksi SQLite. Error apa pun -> rollback
+    (tabel tetap seperti sebelumnya), koneksi ditutup, lalu exception dilempar ulang.
+
+    - sessions / driver_standings / constructor_standings / starting_grid:
+      dihapus seluruhnya lalu diisi ulang (perilaku lama, jangan diubah).
+    - schedule_full / race_results: DIGANTI per season (DELETE ... WHERE season = ?
+      lalu INSERT), bukan upsert. Satu musim datang dalam satu panggilan API, jadi
+      mengganti juga membawa koreksi pasca-race dan baris yang dihapus.
+
+    Pembuatan tabel (CREATE TABLE IF NOT EXISTS) dan migrasi kolom dijalankan
+    sebelum transaksi data; keduanya idempotent dan tidak menyentuh data.
+    """
     conn = sqlite3.connect(db_path)
-    cur = conn.cursor()
-    cur.executescript(SCHEMA_SQL)
-    _migrate_schema(cur)
+    try:
+        cur = conn.cursor()
+        cur.executescript(SCHEMA_SQL)
+        _migrate_schema(cur)
+        conn.commit()
 
-    for table in ("sessions", "driver_standings", "constructor_standings", "starting_grid"):
-        cur.execute(f"DELETE FROM {table}")
+        cur.execute("BEGIN")  # mulai transaksi data (eksplisit)
 
-    # schedule_full + race_results: replace per season
-    cur.execute("DELETE FROM schedule_full WHERE season = ?", (season,))
-    cur.execute("DELETE FROM race_results WHERE season = ?", (season,))
+        for table in ("sessions", "driver_standings", "constructor_standings", "starting_grid"):
+            cur.execute(f"DELETE FROM {table}")
 
-    cur.executemany(
-        "INSERT INTO sessions (round, race_name, session_type, start_time_utc, circuit_name, country_flag, round_relation) "
-        "VALUES (:round, :race_name, :session_type, :start_time_utc, :circuit_name, :country_flag, :round_relation)",
-        sessions,
-    )
-    cur.executemany(
-        "INSERT INTO driver_standings (position, driver_name, driver_abbr, team_name, points, wins, podiums, dnf_dns) "
-        "VALUES (:position, :driver_name, :driver_abbr, :team_name, :points, :wins, :podiums, :dnf_dns)",
-        driver_rows,
-    )
-    cur.executemany(
-        "INSERT INTO constructor_standings (position, team_name, points, wins, podiums, dnf_dns) "
-        "VALUES (:position, :team_name, :points, :wins, :podiums, :dnf_dns)",
-        constructor_rows,
-    )
-    cur.executemany(
-        "INSERT INTO starting_grid (round, round_relation, position, driver_name, driver_abbr, team_name, grid_source) "
-        "VALUES (:round, :round_relation, :position, :driver_name, :driver_abbr, :team_name, :grid_source)",
-        starting_grid_rows,
-    )
-    cur.executemany(
-        "INSERT INTO schedule_full (season, round, race_name, has_sprint, race_start_utc, sprint_start_utc, status) "
-        "VALUES (:season, :round, :race_name, :has_sprint, :race_start_utc, :sprint_start_utc, :status)",
-        schedule_full_rows,
-    )
-    cur.executemany(
-        "INSERT INTO race_results "
-        "(season, round, session, driver_abbr, driver_name, team_name, constructor_id, "
-        "grid, position, position_text, points, status, is_classified) "
-        "VALUES (:season, :round, :session, :driver_abbr, :driver_name, :team_name, :constructor_id, "
-        ":grid, :position, :position_text, :points, :status, :is_classified)",
-        race_results_rows,
-    )
+        # schedule_full + race_results: replace per season
+        cur.execute("DELETE FROM schedule_full WHERE season = ?", (season,))
+        cur.execute("DELETE FROM race_results WHERE season = ?", (season,))
 
-    now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
-    cur.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('season', ?)", (str(season),))
-    cur.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('last_fetched_at', ?)", (now_iso,))
+        cur.executemany(
+            "INSERT INTO sessions (round, race_name, session_type, start_time_utc, circuit_name, country_flag, round_relation) "
+            "VALUES (:round, :race_name, :session_type, :start_time_utc, :circuit_name, :country_flag, :round_relation)",
+            sessions,
+        )
+        cur.executemany(
+            "INSERT INTO driver_standings (position, driver_name, driver_abbr, team_name, points, wins, podiums, dnf_dns) "
+            "VALUES (:position, :driver_name, :driver_abbr, :team_name, :points, :wins, :podiums, :dnf_dns)",
+            driver_rows,
+        )
+        cur.executemany(
+            "INSERT INTO constructor_standings (position, team_name, points, wins, podiums, dnf_dns) "
+            "VALUES (:position, :team_name, :points, :wins, :podiums, :dnf_dns)",
+            constructor_rows,
+        )
+        cur.executemany(
+            "INSERT INTO starting_grid (round, round_relation, position, driver_name, driver_abbr, team_name, grid_source) "
+            "VALUES (:round, :round_relation, :position, :driver_name, :driver_abbr, :team_name, :grid_source)",
+            starting_grid_rows,
+        )
+        cur.executemany(
+            "INSERT INTO schedule_full (season, round, race_name, has_sprint, race_start_utc, sprint_start_utc, status) "
+            "VALUES (:season, :round, :race_name, :has_sprint, :race_start_utc, :sprint_start_utc, :status)",
+            schedule_full_rows,
+        )
+        cur.executemany(
+            "INSERT INTO race_results "
+            "(season, round, session, driver_abbr, driver_name, team_name, constructor_id, "
+            "grid, position, position_text, points, status, is_classified) "
+            "VALUES (:season, :round, :session, :driver_abbr, :driver_name, :team_name, :constructor_id, "
+            ":grid, :position, :position_text, :points, :status, :is_classified)",
+            race_results_rows,
+        )
 
-    conn.commit()
-    conn.close()
+        now_iso = datetime.now(timezone.utc).strftime("%Y-%m-%dT%H:%M:%SZ")
+        cur.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('season', ?)", (str(season),))
+        cur.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('last_fetched_at', ?)", (now_iso,))
+        cur.execute("INSERT OR REPLACE INTO meta (key, value) VALUES ('schema_version', ?)", (SCHEMA_VERSION,))
+        
+        conn.commit()
+    except BaseException:
+        conn.rollback()
+        raise
+    finally:
+        conn.close()
 
 
 # ---------------------------------------------------------------------------
