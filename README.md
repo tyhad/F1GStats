@@ -98,7 +98,7 @@ Output file    : ./f1gstats.sqlite
 ### `meta`
 | Kolom | Tipe | Keterangan |
 |-------|------|------------|
-| `key` | TEXT | Nama kunci (`season`, `last_fetched_at`) |
+| `key` | TEXT | Nama kunci (`season`, `last_fetched_at`, `schema_version`) |
 | `value` | TEXT | Nilai |
 
 ### `sessions`
@@ -149,6 +149,53 @@ Output file    : ./f1gstats.sqlite
 | `team_name` | TEXT | Nama tim |
 | `grid_source` | TEXT | `openf1` (actual, post-penalty) atau `qualifying_fallback` (pre-penalty) |
 
+### `schedule_full`
+Semua round musim (tidak difilter previous/now/next). Diganti per `season` setiap run.
+
+| Kolom | Tipe | Keterangan |
+|-------|------|------------|
+| `season` | INTEGER | Tahun musim (PK bersama `round`) |
+| `round` | INTEGER | Nomor ronde |
+| `race_name` | TEXT | Nama Grand Prix |
+| `has_sprint` | INTEGER | `1` kalau weekend punya sesi Sprint, else `0` |
+| `race_start_utc` | TEXT | Waktu mulai Race (ISO 8601, UTC) |
+| `sprint_start_utc` | TEXT | Waktu mulai Sprint (ISO 8601, UTC), `NULL` kalau tidak ada |
+| `status` | TEXT | `completed` (Race mulai + 3 jam sudah lewat) atau `scheduled` |
+
+### `race_results`
+Satu baris per driver per sesi per round yang sudah selesai. Diganti per `season` setiap run.
+
+| Kolom | Tipe | Keterangan |
+|-------|------|------------|
+| `season` | INTEGER | Tahun musim (PK: `season`, `round`, `session`, `driver_abbr`) |
+| `round` | INTEGER | Nomor ronde |
+| `session` | TEXT | `Race` (Grand Prix) atau `Sprint` |
+| `driver_abbr` | TEXT | Kode 3 huruf |
+| `driver_name` | TEXT | Nama lengkap driver |
+| `team_name` | TEXT | Nama tim (dibersihkan, sama dengan tabel standings) |
+| `constructor_id` | TEXT | ID konstruktor Ergast (mis. `mercedes`) |
+| `grid` | INTEGER | Posisi start dari Ergast |
+| `position` | INTEGER | Urutan akhir dari API; terisi juga untuk pembalap yang tidak terklasifikasi |
+| `position_text` | TEXT | Angka posisi, atau kode huruf (`R`, `D`, `W`, `N`, `E`, `F`) |
+| `points` | REAL | Poin yang diperoleh di sesi ini |
+| `status` | TEXT | Status resmi (mis. `Finished`, `+1 Lap`, `Retired`) |
+| `is_classified` | INTEGER | `1` kalau `position_text` berupa angka (finis resmi), else `0` |
+
+Untuk hitungan "finis resmi" (countback, podium), pakai `is_classified = 1`, bukan `position` saja.
+
+### `data_health`
+Satu baris per run: hasil validasi V1-V6 (lihat `docs/DATA_CONTRACT.md`, bagian 5).
+
+| Kolom | Tipe | Keterangan |
+|-------|------|------------|
+| `id` | INTEGER | Primary key |
+| `season` | INTEGER | Tahun musim |
+| `checked_at` | TEXT | Waktu pengecekan (ISO 8601, UTC) |
+| `status` | TEXT | `ok`, `warn`, atau `fail` |
+| `details_json` | TEXT | JSON: list `{id, status, message}` untuk V1-V6 |
+
+Baris dengan `status = 'fail'` berarti run itu **tidak menulis** tabel data; data yang ada di tabel lain berasal dari run sebelumnya.
+
 ---
 
 ## Sumber Data
@@ -171,4 +218,7 @@ Script secara otomatis membuat direktori `.fastf1_cache/` di folder project untu
 
 - **`round_relation`**: Script hanya menyimpan data untuk 2–3 round (previous, now, next). Data round lain tidak disimpan ke SQLite.
 - **`grid_source`**: Field ini menunjukkan apakah starting grid untuk suatu round berasal dari OpenF1 (actual, sudah termasuk grid penalty) atau dari hasil Qualifying via Ergast (fallback, belum termasuk grid penalty). Cek field ini untuk mengetahui akurasi data grid tiap round.
-- **Re-run**: Setiap kali script dijalankan, semua tabel (kecuali `meta`) dihapus dan diisi ulang dengan data terbaru.
+- **Re-run**: Setiap kali script dijalankan, semua tabel data ditulis ulang dalam **satu transaksi SQLite**. `sessions`, `driver_standings`, `constructor_standings`, dan `starting_grid` dikosongkan lalu diisi ulang. `schedule_full` dan `race_results` **diganti per season** (`DELETE ... WHERE season = ?` lalu insert, bukan upsert), sehingga data season lain tidak tersentuh dan koreksi pasca-race ikut masuk. `meta` di-update (`season`, `last_fetched_at`, `schema_version`).
+- **Gagal = database tidak berubah**: kalau terjadi error saat menulis, transaksi di-rollback dan semua tabel tetap seperti sebelumnya. Proses keluar dengan exit code `1` (cek `echo %ERRORLEVEL%` di cmd atau `echo $LASTEXITCODE` di PowerShell).
+- **Validasi sebelum menulis**: data dicek (V1-V6, lihat `docs/DATA_CONTRACT.md`) sebelum transaksi dibuka. Hasilnya dicatat di tabel `data_health`. Status `fail` (mis. hasil race belum terbit sementara jadwal sudah `completed`) berarti tabel data **tidak disentuh** dan proses keluar dengan exit code `2`; jalankan ulang nanti. Status `ok`/`warn` menulis data (exit code `0`).
+- **Exit code**: `0` = ok atau warn (data ditulis), `1` = error tak terduga (tidak ada yang ditulis), `2` = validasi gagal (data tidak ditulis, `data_health` dicatat).
