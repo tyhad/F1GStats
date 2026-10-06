@@ -7,7 +7,7 @@ import fetch_f1_data as f
 
 TABLES = (
     "meta", "sessions", "driver_standings", "constructor_standings",
-    "starting_grid", "schedule_full", "race_results", "data_health",
+    "starting_grid", "schedule_full", "race_results", "data_health", "qualifying_results",
 )
 
 
@@ -199,3 +199,60 @@ def test_error_after_health_insert_rolls_back_health_too(tmp_path):
     with pytest.raises(sqlite3.IntegrityError):
         f.write_or_reject(db, season, bad, "ok", DETAILS_OK)
     assert _health_rows(db) == before_health
+
+# --- qualifying_results ---------------------------------------------------------------
+
+def _q(season, rnd, abbr, pos):
+    return {"season": season, "round": rnd, "driver_abbr": abbr, "position": pos}
+
+
+def _write_q(db, qualifying_rows, season=2026, **kw):
+    p = _payload(season=season, **{k: v for k, v in kw.items() if k in ("n_rounds", "drivers")})
+    p["qualifying_rows"] = qualifying_rows
+    f.write_to_sqlite(db, **p)
+
+
+def _q_rows(db, season=None):
+    conn = sqlite3.connect(db)
+    try:
+        q = "SELECT season, round, driver_abbr, position FROM qualifying_results"
+        args = ()
+        if season is not None:
+            q += " WHERE season = ?"
+            args = (season,)
+        return sorted(conn.execute(q + " ORDER BY season, round, position", args).fetchall())
+    finally:
+        conn.close()
+
+
+def test_qualifying_rows_are_written(tmp_path):
+    db = str(tmp_path / "x.sqlite")
+    _write_q(db, [_q(2026, 1, "AAA", 1), _q(2026, 1, "BBB", 2)])
+    assert _q_rows(db) == [(2026, 1, "AAA", 1), (2026, 1, "BBB", 2)]
+
+
+def test_qualifying_replaced_per_season_not_upserted(tmp_path):
+    db = str(tmp_path / "x.sqlite")
+    _write_q(db, [_q(2025, 1, "OLD", 1)], season=2025)
+    _write_q(db, [_q(2026, 1, "AAA", 1), _q(2026, 2, "AAA", 1)])
+    _write_q(db, [_q(2026, 1, "AAA", 2)])   # round 2 hilang dari API -> harus ikut hilang
+    assert _q_rows(db, 2026) == [(2026, 1, "AAA", 2)]
+    assert _q_rows(db, 2025) == [(2025, 1, "OLD", 1)]  # season lain tidak tersentuh
+
+
+def test_qualifying_none_leaves_existing_rows_alone(tmp_path):
+    db = str(tmp_path / "x.sqlite")
+    _write_q(db, [_q(2026, 1, "AAA", 1)])
+    _write(db)  # pemanggil lama tanpa qualifying_rows
+    assert _q_rows(db, 2026) == [(2026, 1, "AAA", 1)]
+
+
+def test_qualifying_error_rolls_back_with_everything(tmp_path):
+    db = str(tmp_path / "x.sqlite")
+    _write_q(db, [_q(2026, 1, "AAA", 1)])
+    before = _snapshot(db)
+    bad = _payload(n_rounds=4)
+    bad["qualifying_rows"] = [_q(2026, 1, "ZZZ", 1), _q(2026, 1, "ZZZ", 2)]  # PK ganda
+    with pytest.raises(sqlite3.IntegrityError):
+        f.write_to_sqlite(db, **bad)
+    assert _snapshot(db) == before

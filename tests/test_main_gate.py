@@ -47,6 +47,9 @@ def patched_main(monkeypatch, tmp_path):
     monkeypatch.setattr(f, "fetch_driver_standings", lambda *a, **k: _rows(state["n_rounds"])[1])
     monkeypatch.setattr(f, "fetch_constructor_standings", lambda *a, **k: _rows(state["n_rounds"])[2])
     monkeypatch.setattr(f, "fetch_starting_grid", lambda *a, **k: [])
+    monkeypatch.setattr(f, "fetch_qualifying_rows", lambda *a, **k: [
+        {"season": 2026, "round": r, "driver_abbr": d, "position": i + 1}
+        for r in range(1, state["n_rounds"] + 1) for i, d in enumerate(("AAA", "BBB"))])
     db = str(tmp_path / "out.sqlite")
     monkeypatch.setattr(sys, "argv", ["f1gstats", "--season", "2026", "--output", db])
     return db, state
@@ -65,6 +68,7 @@ def test_main_ok_run_writes_data_and_health(patched_main):
     # 2 driver per round: V6 ok; total poin 0 sah; semua konsisten -> ok
     f.main()
     assert _count(db, "race_results") == 4
+    assert _count(db, "qualifying_results") == 4
     conn = sqlite3.connect(db)
     assert conn.execute("SELECT status FROM data_health").fetchall() == [("ok",)]
     conn.close()
@@ -83,6 +87,7 @@ def test_main_forced_fail_exits_2_and_keeps_old_data(patched_main, monkeypatch):
     assert exc.value.code == 2
 
     assert _count(db, "race_results") == 4      # tabel data tidak berubah
+    assert _count(db, "qualifying_results") == 4
     assert _count(db, "schedule_full") == 2
     conn = sqlite3.connect(db)
     assert [r[0] for r in conn.execute("SELECT status FROM data_health ORDER BY id")] == ["ok", "fail"]
