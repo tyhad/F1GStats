@@ -327,6 +327,22 @@ def fetch_circuit_names(ergast: Ergast, season: int) -> dict[int, str]:
 # ---------------------------------------------------------------------------
 
 
+def _iter_result_pages(resp):
+    """
+    Yield `resp` lalu semua halaman berikutnya (Jolpica membatasi 100 baris per respons).
+
+    FastF1 tidak auto-paginate, jadi satu request hanya mengembalikan halaman pertama.
+    Satu round bisa terbelah di batas halaman; pemanggil cukup memproses tiap halaman
+    apa adanya (round selalu diambil dari description halaman yang sama).
+    """
+    while True:
+        yield resp
+        try:
+            resp = resp.get_next_result_page()
+        except ValueError:  # tidak ada halaman berikutnya
+            return
+
+
 def fetch_all_race_results(ergast: Ergast, season: int):
     """
     Return dict:
@@ -343,34 +359,33 @@ def fetch_all_race_results(ergast: Ergast, season: int):
     driver_stats: dict[str, dict] = {}
     constructor_stats: dict[str, dict] = {}
 
-    # PENTING: Ergast/Jolpica API punya default page limit yang kecil (klasik:
-    # 30 baris per request) kalau parameter `limit` tidak di-set eksplisit.
-    # FastF1 TIDAK auto-paginate -- cuma 1x HTTP request. Satu musim F1 bisa
-    # 260-500+ baris hasil race (rounds x drivers), jadi tanpa limit besar,
-    # cuma sebagian kecil ronde awal musim yang benar-benar kefetch -> podium
-    # & DNF/DNS jadi salah/kurang lengkap untuk mayoritas driver.
+    # PENTING: Jolpica membatasi respons maksimal 100 baris dan diam-diam memotong
+    # `limit` yang lebih besar (limit=2000 TIDAK cukup). FastF1 juga tidak
+    # auto-paginate. Satu musim bisa 350+ baris hasil race, jadi semua halaman harus
+    # diambil; kalau tidak, podium & DNF/DNS hanya menghitung beberapa round awal.
     resp = ergast.get_race_results(season=season, limit=2000)
-    # resp.content adalah list of DataFrame, satu per race (round)
-    for race_results in resp.content:
-        for _, r in race_results.iterrows():
-            d_code = str(r.get("driverCode") or r.get("familyName"))
-            c_name = str(r.get("constructorName"))
-            position_text = str(r.get("positionText", r.get("position", ""))).strip()
+    # tiap halaman: resp.content = list of DataFrame (satu per race/round)
+    for page in _iter_result_pages(resp):
+        for race_results in page.content:
+            for _, r in race_results.iterrows():
+                d_code = str(r.get("driverCode") or r.get("familyName"))
+                c_name = str(r.get("constructorName"))
+                position_text = str(r.get("positionText", r.get("position", ""))).strip()
 
-            for key, table in ((d_code, driver_stats), (c_name, constructor_stats)):
-                if key not in table:
-                    table[key] = {"podiums": 0, "dnf_dns": 0}
+                for key, table in ((d_code, driver_stats), (c_name, constructor_stats)):
+                    if key not in table:
+                        table[key] = {"podiums": 0, "dnf_dns": 0}
 
-            is_finished = position_text.isdigit()
-            is_podium = is_finished and int(position_text) <= 3
+                is_finished = position_text.isdigit()
+                is_podium = is_finished and int(position_text) <= 3
 
-            if is_podium:
-                driver_stats[d_code]["podiums"] += 1
-                constructor_stats[c_name]["podiums"] += 1
+                if is_podium:
+                    driver_stats[d_code]["podiums"] += 1
+                    constructor_stats[c_name]["podiums"] += 1
 
-            if not is_finished:
-                driver_stats[d_code]["dnf_dns"] += 1
-                constructor_stats[c_name]["dnf_dns"] += 1
+                if not is_finished:
+                    driver_stats[d_code]["dnf_dns"] += 1
+                    constructor_stats[c_name]["dnf_dns"] += 1
 
     return driver_stats, constructor_stats
 
@@ -395,7 +410,12 @@ def fetch_results_rows(ergast: Ergast, season: int, session: str) -> list[dict]:
     Return list[dict] — satu baris per driver per round yang sudah selesai.
 
     session: "Race" → pakai get_race_results
-             "Sprint" → pakai get_sprint_results (empty content → [], tidak raise)
+             "Sprint" → pakai get_sprint_results (belum ada sprint → content kosong → [], tidak raise)
+
+    Semua halaman hasil diambil (Jolpica membatasi 100 baris per respons).
+
+    Error sungguhan (jaringan, HTTP, JSON) sengaja TIDAK ditelan: biar naik ke __main__
+    dan exit code 1. Kalau ditelan, season tanpa sprint palsu akan menimpa data lama.
 
     Kolom yang di-map (sesuai konfirmasi dari API, lihat komentar di atas):
       driver_abbr    ← driverCode
@@ -412,64 +432,73 @@ def fetch_results_rows(ergast: Ergast, season: int, session: str) -> list[dict]:
     if session == "Race":
         resp = ergast.get_race_results(season=season, limit=2000)
     elif session == "Sprint":
-        try:
-            resp = ergast.get_sprint_results(season=season, limit=2000)
-        except Exception as exc:
-            print(f"  [WARN] fetch_results_rows Sprint: {exc} — mengembalikan []")
-            return []
+        resp = ergast.get_sprint_results(season=season, limit=2000)
     else:
         raise ValueError(f"session harus 'Race' atau 'Sprint', bukan {session!r}")
 
-    if not resp.content:
-        return []
+    # Jolpica membatasi `limit` (maks 100 baris per respons) dan DIAM-DIAM memotong
+    # permintaan limit=2000. Karena itu semua halaman harus diambil. Satu round bisa
+    # terpotong di batas halaman; tidak masalah karena baris di-append per halaman
+    # dan nomor round selalu diambil dari description halaman yang sama.
+    expected_total = resp.total_results
+    print(f"  [DEBUG] {session} total_results={expected_total}, "
+          f"limit per halaman={resp._response_headers.get('limit')}")
 
     _printed_header = False
     rows = []
 
-    for round_df, desc_row in zip(resp.content, resp.description.itertuples()):
-        if round_df.empty:
-            continue
+    while True:
+        for round_df, desc_row in zip(resp.content, resp.description.itertuples()):
+            if round_df.empty:
+                continue
 
-        # Print columns + sample row sekali saja (sesuai aturan AGENTS.md)
-        if not _printed_header:
-            print(f"  [DEBUG] {session} resp.description columns: {list(resp.description.columns)}")
-            print(f"  [DEBUG] {session} result df.columns: {round_df.columns.tolist()}")
-            print(f"  [DEBUG] sample row: {round_df.iloc[0].to_dict()}")
-            _printed_header = True
+            # Print columns + sample row sekali saja (sesuai aturan AGENTS.md)
+            if not _printed_header:
+                print(f"  [DEBUG] {session} resp.description columns: {list(resp.description.columns)}")
+                print(f"  [DEBUG] {session} result df.columns: {round_df.columns.tolist()}")
+                print(f"  [DEBUG] sample row: {round_df.iloc[0].to_dict()}")
+                _printed_header = True
 
-        round_no = int(desc_row.round)
+            round_no = int(desc_row.round)
 
-        for _, r in round_df.iterrows():
-            abbr = str(r.get("driverCode") or r.get("familyName") or "")
-            given = str(r.get("givenName", "") or "")
-            family = str(r.get("familyName", "") or "")
-            driver_name = f"{given} {family}".strip()
-            team_name = clean_team_name(str(r.get("constructorName", "") or ""))
-            constructor_id = str(r.get("constructorId", "") or "")
-            grid = r.get("grid")
-            grid = int(grid) if grid is not None and str(grid) not in ("", "nan") else None
-            pos_text = str(r.get("positionText", r.get("position", "")) or "").strip()
-            is_classified = 1 if pos_text.isdigit() else 0
-            position = int(pos_text) if is_classified else None
-            points = float(r.get("points", 0) or 0)
-            status = str(r.get("status", "") or "")
+            for _, r in round_df.iterrows():
+                abbr = str(r.get("driverCode") or r.get("familyName") or "")
+                given = str(r.get("givenName", "") or "")
+                family = str(r.get("familyName", "") or "")
+                driver_name = f"{given} {family}".strip()
+                team_name = clean_team_name(str(r.get("constructorName", "") or ""))
+                constructor_id = str(r.get("constructorId", "") or "")
+                grid = r.get("grid")
+                grid = int(grid) if grid is not None and str(grid) not in ("", "nan") else None
+                pos_text = str(r.get("positionText", r.get("position", "")) or "").strip()
+                is_classified = 1 if pos_text.isdigit() else 0
+                position = int(pos_text) if is_classified else None
+                points = float(r.get("points", 0) or 0)
+                status = str(r.get("status", "") or "")
 
-            rows.append({
-                "season": season,
-                "round": round_no,
-                "session": session,
-                "driver_abbr": abbr,
-                "driver_name": driver_name,
-                "team_name": team_name,
-                "constructor_id": constructor_id,
-                "grid": grid,
-                "position": position,
-                "position_text": pos_text,
-                "points": points,
-                "status": status,
-                "is_classified": is_classified,
-            })
+                rows.append({
+                    "season": season,
+                    "round": round_no,
+                    "session": session,
+                    "driver_abbr": abbr,
+                    "driver_name": driver_name,
+                    "team_name": team_name,
+                    "constructor_id": constructor_id,
+                    "grid": grid,
+                    "position": position,
+                    "position_text": pos_text,
+                    "points": points,
+                    "status": status,
+                    "is_classified": is_classified,
+                })
 
+        try:
+            resp = resp.get_next_result_page()
+        except ValueError:  # tidak ada halaman berikutnya
+            break
+
+    if len(rows) != expected_total:
+        print(f"  [WARN] {session}: {len(rows)} baris terbaca, tapi API melaporkan total {expected_total}")
     return rows
 
 
@@ -822,12 +851,12 @@ def main():
 
     now_utc = datetime.now(timezone.utc)
 
-    print(f"[1/9] Fetch season schedule {args.season} ...")
+    print(f"[1/10] Fetch season schedule {args.season} ...")
     ergast = Ergast()
     schedule = fastf1.get_event_schedule(args.season, include_testing=False)
     print(f"      -> {len(schedule)} round di kalender musim ini")
 
-    print("[2/9] Fetch nama sirkuit resmi per ronde ...")
+    print("[2/10] Fetch nama sirkuit resmi per ronde ...")
     circuit_names_by_round = fetch_circuit_names(ergast, args.season)
 
     sessions, round_relations, selected_rounds, location_by_round = fetch_sessions(
@@ -835,35 +864,46 @@ def main():
     )
     print(f"      -> {len(sessions)} sesi ditemukan (round before/now/after saja)")
 
-    print("[3/9] Build schedule_full (semua round musim) ...")
+    print("[3/10] Build schedule_full (semua round musim) ...")
     schedule_full_rows = build_schedule_full(schedule, args.season, now_utc)
     sprint_count = sum(r["has_sprint"] for r in schedule_full_rows)
     completed_count = sum(1 for r in schedule_full_rows if r["status"] == "completed")
     print(f"      -> {len(schedule_full_rows)} round total, {sprint_count} sprint weekend, {completed_count} completed")
 
-    print("[4/9] Fetch hasil tiap race musim ini (untuk podium & DNF/DNS) ...")
+    print("[4/10] Fetch hasil tiap race musim ini (untuk podium & DNF/DNS) ...")
     driver_race_stats, constructor_race_stats = fetch_all_race_results(ergast, args.season)
 
-    print("[5/9] Fetch race_results (Grand Prix, per driver per round) ...")
+    print("[5/10] Fetch race_results (Grand Prix, per driver per round) ...")
     race_results_rows = fetch_results_rows(ergast, args.season, "Race")
     gp_rounds = len({r["round"] for r in race_results_rows})
     print(f"      -> {len(race_results_rows)} baris ({gp_rounds} round GP)")
 
-    print("[6/9] Fetch WDC standing ...")
+    print("[6/10] Fetch race_results (Sprint, per driver per round) ...")
+    sprint_rows = fetch_results_rows(ergast, args.season, "Sprint")
+    sprint_rounds = {r["round"] for r in sprint_rows}
+    print(f"      -> {len(sprint_rows)} baris ({len(sprint_rounds)} round sprint)")
+    # Sanity check informatif (bukan validasi; validasi resmi ada di Step 6)
+    sprint_weekends = {r["round"] for r in schedule_full_rows if r["has_sprint"]}
+    unexpected = sorted(sprint_rounds - sprint_weekends)
+    if unexpected:
+        print(f"      [WARN] round {unexpected} punya hasil sprint tapi has_sprint=0 di schedule_full")
+    race_results_rows = race_results_rows + sprint_rows
+
+    print("[7/10] Fetch WDC standing ...")
     driver_rows = fetch_driver_standings(ergast, args.season, driver_race_stats)
     print(f"      -> {len(driver_rows)} driver")
 
-    print("[7/9] Fetch WCC standing ...")
+    print("[8/10] Fetch WCC standing ...")
     constructor_rows = fetch_constructor_standings(ergast, args.season, constructor_race_stats)
     print(f"      -> {len(constructor_rows)} constructor")
 
-    print("[8/9] Fetch starting grid (OpenF1 actual, fallback Qualifying) round terkait ...")
+    print("[9/10] Fetch starting grid (OpenF1 actual, fallback Qualifying) round terkait ...")
     starting_grid_rows = fetch_starting_grid(
         ergast, args.season, selected_rounds, round_relations, location_by_round
     )
     print(f"      -> {len(starting_grid_rows)} baris starting grid")
 
-    print(f"[9/9] Tulis ke SQLite: {args.output}")
+    print(f"[10/10] Tulis ke SQLite: {args.output}")
     write_to_sqlite(
         args.output, args.season,
         sessions, driver_rows, constructor_rows, starting_grid_rows,
@@ -874,7 +914,8 @@ def main():
     print("=== FETCH SELESAI ===")
     print(f"Season         : {args.season}")
     print(f"Schedule full  : {len(schedule_full_rows)} round ({sprint_count} sprint, {completed_count} completed)")
-    print(f"Race results   : {len(race_results_rows)} baris ({gp_rounds} round GP)")
+    print(f"Race results   : {len(race_results_rows) - len(sprint_rows)} baris GP ({gp_rounds} round), "
+          f"{len(sprint_rows)} baris Sprint ({len(sprint_rounds)} round)")
     print(f"Sessions       : {len(sessions)}")
     print(f"Driver standing: {len(driver_rows)}")
     print(f"Constructor    : {len(constructor_rows)}")
