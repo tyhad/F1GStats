@@ -6,10 +6,11 @@ validates the data, and writes `f1gstats.sqlite`. Two consumers read that file:
 - LiveOverlay Studio (existing tables; must not break)
 - To the Flag (new tables from Phase 0; separate repo, read-only)
 
-## Commands (Windows / PowerShell)
+## Commands (Windows; cmd or PowerShell)
 - Setup: `py -m venv venv`, then `venv\Scripts\activate`, then `pip install -r requirements.txt -r requirements-dev.txt`
 - Run: `py fetch_f1_data.py --season 2026 --output ./f1gstats.sqlite`
 - Test: `pytest`
+- Exit code: `echo %ERRORLEVEL%` (cmd) or `$LASTEXITCODE` (PowerShell). Run it on its own line; in cmd, `;` does not separate commands.
 
 ## Read first
 1. `docs/DATA_CONTRACT.md`: tables, domain rules, validation, exit codes. Source of truth.
