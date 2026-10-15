@@ -26,6 +26,9 @@ env/
 # FastF1 session cache (bisa ratusan MB)
 .fastf1_cache/
 
+# History fetch output
+history/
+
 # SQLite output files (data lokal, di-generate saat runtime)
 *.sqlite
 *.db
