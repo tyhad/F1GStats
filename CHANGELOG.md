@@ -7,6 +7,9 @@ Format mengikuti [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Fixed
+- `driver_abbr` jadi `'nan'` (V5 fail) untuk driver yang `code`-nya tidak diisi API (mis. driver baru di akhir musim): kolom `driverCode` berisi NaN, dan `NaN or familyName` tetap NaN. Sekarang semua fetcher (hasil Race/Sprint, qualifying, starting grid fallback, standings, dan statistik podium/DNF) memakai satu helper `driver_abbr_from_row`: pakai `driverCode` kalau ada, kalau tidak turunkan 3 huruf dari `familyName` (tanpa aksen, huruf besar). Pengecualian manual lewat `_ABBR_OVERRIDES`. Tes baru: `tests/test_driver_abbr.py`.
+
 ### Added
 - Tabel `schedule_full`: semua round musim (tidak difilter), termasuk field `has_sprint`, `race_start_utc`, `sprint_start_utc`, dan `status` (`completed` / `scheduled`).
 - `build_schedule_full(schedule, season, now_utc)` — membangun baris `schedule_full` dari DataFrame FastF1 schedule tanpa filtering round.

@@ -30,6 +30,7 @@ import os
 import re
 import sqlite3
 import sys
+import unicodedata
 from datetime import datetime, timezone
 
 import fastf1
@@ -37,6 +38,53 @@ import requests
 from fastf1.ergast import Ergast
 
 from validation import run_checks
+
+
+def _is_missing(value) -> bool:
+    """True untuk None, NaN/NA pandas, dan string kosong / 'nan' / 'none' / '<NA>'."""
+    if value is None:
+        return True
+    try:
+        if value != value:  # NaN != NaN
+            return True
+    except (TypeError, ValueError):
+        pass
+    return str(value).strip().lower() in ("", "nan", "none", "<na>")
+
+
+def driver_abbr_from_row(r) -> str:
+    """
+    Kode 3 huruf driver dari satu baris Ergast/Jolpica (Series atau dict).
+
+    1. driverCode kalau diisi API (apa adanya; validitas format dinilai V5).
+    2. Kalau tidak ada (mis. driver baru yang belum punya `code` di API, kolomnya NaN),
+       turunkan dari familyName: buang aksen, huruf besar, 3 huruf pertama
+       (Hirakawa -> HIR, Câmara -> CAM). Konvensi ini sama dengan kode resmi F1
+       untuk kebanyakan driver. Kalau butuh pengecualian, isi _ABBR_OVERRIDES.
+    3. Kalau masih gagal, kembalikan "" (V5 akan menggagalkan run, bukan 'nan').
+
+    SEMUA fetcher harus lewat fungsi ini supaya kode driver konsisten antara
+    race_results, qualifying_results, driver_standings, dan starting_grid
+    (V3 mencocokkan lewat driver_abbr).
+    """
+    driver_id = str(r.get("driverId") or "")
+    if driver_id in _ABBR_OVERRIDES:
+        return _ABBR_OVERRIDES[driver_id]
+
+    code = r.get("driverCode")
+    if not _is_missing(code):
+        return str(code).strip()  # apa adanya seperti API; validitas dinilai V5
+
+    family = r.get("familyName")
+    if _is_missing(family):
+        return ""
+    ascii_family = unicodedata.normalize("NFKD", str(family)).encode("ascii", "ignore").decode()
+    letters = re.sub(r"[^A-Za-z]", "", ascii_family).upper()
+    return letters[:3] if len(letters) >= 3 else ""
+
+
+# Pengecualian manual: driverId (Jolpica) -> kode resmi. Kosong = pakai aturan di atas.
+_ABBR_OVERRIDES: dict[str, str] = {}
 
 # ---------------------------------------------------------------------------
 # Konversi negara -> emoji flag
@@ -371,7 +419,7 @@ def fetch_all_race_results(ergast: Ergast, season: int):
     for page in _iter_result_pages(resp):
         for race_results in page.content:
             for _, r in race_results.iterrows():
-                d_code = str(r.get("driverCode") or r.get("familyName"))
+                d_code = driver_abbr_from_row(r)
                 c_name = str(r.get("constructorName"))
                 position_text = str(r.get("positionText", r.get("position", ""))).strip()
 
@@ -421,7 +469,7 @@ def fetch_results_rows(ergast: Ergast, season: int, session: str) -> list[dict]:
     dan exit code 1. Kalau ditelan, season tanpa sprint palsu akan menimpa data lama.
 
     Kolom yang di-map (sesuai konfirmasi dari API, lihat komentar di atas):
-      driver_abbr    ← driverCode
+      driver_abbr    ← driverCode (fallback: 3 huruf pertama familyName, lihat driver_abbr_from_row)
       driver_name    ← givenName + " " + familyName
       team_name      ← constructorName (via clean_team_name)
       constructor_id ← constructorId
@@ -465,7 +513,7 @@ def fetch_results_rows(ergast: Ergast, season: int, session: str) -> list[dict]:
             round_no = int(desc_row.round)
 
             for _, r in round_df.iterrows():
-                abbr = str(r.get("driverCode") or r.get("familyName") or "")
+                abbr = driver_abbr_from_row(r)
                 given = str(r.get("givenName", "") or "")
                 family = str(r.get("familyName", "") or "")
                 driver_name = f"{given} {family}".strip()
@@ -547,7 +595,7 @@ def fetch_qualifying_rows(ergast: Ergast, season: int) -> list[dict]:
                 rows.append({
                     "season": season,
                     "round": round_no,
-                    "driver_abbr": str(r.get("driverCode") or r.get("familyName") or ""),
+                    "driver_abbr": driver_abbr_from_row(r),
                     "position": position,
                 })
 
@@ -676,7 +724,7 @@ def fetch_starting_grid(ergast: Ergast, season: int, rounds_to_fetch: set[int],
             continue
 
         for _, q in df.iterrows():
-            abbr = str(q.get("driverCode") or "")
+            abbr = driver_abbr_from_row(q)
             given = str(q.get("givenName", ""))
             family = str(q.get("familyName", ""))
             team = str(q.get("constructorName", ""))
@@ -701,7 +749,7 @@ def fetch_driver_standings(ergast: Ergast, season: int, race_stats: dict) -> lis
     df = resp.content[0]  # standings terbaru == elemen terakhir/pertama tergantung query; ambil yg tersedia
     rows = []
     for _, d in df.iterrows():
-        abbr = str(d.get("driverCode") or "")
+        abbr = driver_abbr_from_row(d)
         given = str(d.get("givenName", ""))
         family = str(d.get("familyName", ""))
         team_raw = str(d.get("constructorNames", ""))  # bisa berisi >1 tim kalau driver pindah tim musim ini
