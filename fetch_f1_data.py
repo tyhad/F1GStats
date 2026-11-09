@@ -39,6 +39,8 @@ from fastf1.ergast import Ergast
 
 from validation import run_checks
 
+VERBOSE = False
+
 
 def _is_missing(value) -> bool:
     """True untuk None, NaN/NA pandas, dan string kosong / 'nan' / 'none' / '<NA>'."""
@@ -456,7 +458,7 @@ def fetch_all_race_results(ergast: Ergast, season: int):
 #   season, round, url, raceName, circuitId, circuitUrl, circuitName,
 #   lat, long, locality, country, date, time
 
-def fetch_results_rows(ergast: Ergast, season: int, session: str) -> list[dict]:
+def fetch_results_rows(ergast: Ergast, season: int, session: str, verbose: bool | None = None) -> list[dict]:
     """
     Return list[dict] — satu baris per driver per round yang sudah selesai.
 
@@ -480,6 +482,8 @@ def fetch_results_rows(ergast: Ergast, season: int, session: str) -> list[dict]:
       status         ← status
       is_classified  ← positionText.isdigit()
     """
+    if verbose is None:
+        verbose = VERBOSE
     if session == "Race":
         resp = ergast.get_race_results(season=season, limit=2000)
     elif session == "Sprint":
@@ -492,8 +496,9 @@ def fetch_results_rows(ergast: Ergast, season: int, session: str) -> list[dict]:
     # terpotong di batas halaman; tidak masalah karena baris di-append per halaman
     # dan nomor round selalu diambil dari description halaman yang sama.
     expected_total = resp.total_results
-    print(f"  [DEBUG] {session} total_results={expected_total}, "
-          f"limit per halaman={resp._response_headers.get('limit')}")
+    if verbose:
+        print(f"  [DEBUG] {session} total_results={expected_total}, "
+              f"limit per halaman={resp._response_headers.get('limit')}")
 
     _printed_header = False
     rows = []
@@ -505,9 +510,10 @@ def fetch_results_rows(ergast: Ergast, season: int, session: str) -> list[dict]:
 
             # Print columns + sample row sekali saja (sesuai aturan AGENTS.md)
             if not _printed_header:
-                print(f"  [DEBUG] {session} resp.description columns: {list(resp.description.columns)}")
-                print(f"  [DEBUG] {session} result df.columns: {round_df.columns.tolist()}")
-                print(f"  [DEBUG] sample row: {round_df.iloc[0].to_dict()}")
+                if verbose:
+                    print(f"  [DEBUG] {session} resp.description columns: {list(resp.description.columns)}")
+                    print(f"  [DEBUG] {session} result df.columns: {round_df.columns.tolist()}")
+                    print(f"  [DEBUG] sample row: {round_df.iloc[0].to_dict()}")
                 _printed_header = True
 
             round_no = int(desc_row.round)
@@ -561,7 +567,7 @@ def fetch_results_rows(ergast: Ergast, season: int, session: str) -> list[dict]:
 # Fetch: hasil Qualifying per round  (untuk tabel qualifying_results, Step 7)
 # ---------------------------------------------------------------------------
 
-def fetch_qualifying_rows(ergast: Ergast, season: int) -> list[dict]:
+def fetch_qualifying_rows(ergast: Ergast, season: int, verbose: bool | None = None) -> list[dict]:
     """
     Return list[dict] — satu baris per driver per round yang qualifying-nya sudah selesai:
       {season, round, driver_abbr, position}
@@ -571,6 +577,8 @@ def fetch_qualifying_rows(ergast: Ergast, season: int) -> list[dict]:
     diambil (Jolpica membatasi 100 baris per respons, lihat _iter_result_pages).
     Error sungguhan (jaringan, HTTP, JSON) tidak ditelan.
     """
+    if verbose is None:
+        verbose = VERBOSE
     resp = ergast.get_qualifying_results(season=season, limit=2000)
     expected_total = resp.total_results
 
@@ -584,8 +592,9 @@ def fetch_qualifying_rows(ergast: Ergast, season: int) -> list[dict]:
 
             # Print columns + sample row sekali saja (sesuai aturan AGENTS.md)
             if not _printed_header:
-                print(f"  [DEBUG] Qualifying result df.columns: {round_df.columns.tolist()}")
-                print(f"  [DEBUG] Qualifying sample row: {round_df.iloc[0].to_dict()}")
+                if verbose:
+                    print(f"  [DEBUG] Qualifying result df.columns: {round_df.columns.tolist()}")
+                    print(f"  [DEBUG] Qualifying sample row: {round_df.iloc[0].to_dict()}")
                 _printed_header = True
 
             round_no = int(desc_row.round)
@@ -1041,11 +1050,19 @@ def write_or_reject(db_path: str, season: int, payload: dict, health_status: str
 # Main
 # ---------------------------------------------------------------------------
 
-def main():
+def build_parser() -> argparse.ArgumentParser:
     parser = argparse.ArgumentParser(description="Fetch data F1 ke SQLite untuk LiveOverlay Studio")
     parser.add_argument("--season", type=int, required=True, help="Tahun musim, contoh: 2026")
     parser.add_argument("--output", type=str, default="./f1gstats.sqlite", help="Path file SQLite output")
+    parser.add_argument("--verbose", action="store_true", help="Tampilkan output debug ([DEBUG])")
+    return parser
+
+
+def main():
+    global VERBOSE
+    parser = build_parser()
     args = parser.parse_args()
+    VERBOSE = args.verbose
 
     os.makedirs("./.fastf1_cache", exist_ok=True)
     fastf1.Cache.enable_cache("./.fastf1_cache")

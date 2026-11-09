@@ -63,6 +63,7 @@ python fetch_f1_data.py --season 2026 --output ./f1gstats.sqlite
 |---------|-------|---------|------------|
 | `--season` | ✅ | — | Tahun musim F1, contoh: `2026` |
 | `--output` | ❌ | `./f1gstats.sqlite` | Path file SQLite output |
+| `--verbose` | ❌ | `False` | Tampilkan output debug (`[DEBUG]` daftar kolom & sampel baris) |
 
 ### Contoh output terminal
 

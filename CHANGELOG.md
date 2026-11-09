@@ -7,6 +7,9 @@ Format mengikuti [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Added
+- Flag CLI `--verbose` pada `fetch_f1_data.py`: baris `[DEBUG]` (daftar kolom API dan sampel baris) kini disembunyikan secara default untuk output yang lebih bersih saat dijalankan via skrip/refresh; flag `--verbose` mengaktifkannya kembali. Tes: `tests/test_verbose.py`.
+
 ### Fixed
 - `driver_abbr` jadi `'nan'` (V5 fail) untuk driver yang `code`-nya tidak diisi API (mis. driver baru di akhir musim): kolom `driverCode` berisi NaN, dan `NaN or familyName` tetap NaN. Sekarang semua fetcher (hasil Race/Sprint, qualifying, starting grid fallback, standings, dan statistik podium/DNF) memakai satu helper `driver_abbr_from_row`: pakai `driverCode` kalau ada, kalau tidak turunkan 3 huruf dari `familyName` (tanpa aksen, huruf besar). Pengecualian manual lewat `_ABBR_OVERRIDES`. Tes baru: `tests/test_driver_abbr.py`.
 
