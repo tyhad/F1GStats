@@ -13,7 +13,7 @@ import re
 GP_TOTALS = (101.0, 79.0, 52.0, 16.0, 0.0)   # total poin GP yang sah (skala 25/50/75% + tanpa poin)
 SPRINT_TOTALS = (36.0, 0.0)                   # sprint: 8-7-6-5-4-3-2-1 atau 0
 ABBR_RE = re.compile(r"^[A-Z]{3}$")
-ROW_COUNT_TOLERANCE = 2
+ROW_COUNT_SHORT_TOLERANCE = 2                 # V6: boleh kurang paling banyak 2 baris dari 2 x tim
 _TOL = 1e-6
 _MAX_LISTED = 5
 
@@ -106,6 +106,21 @@ def check_v4(race_results_rows, schedule_full_rows) -> dict:
 
 
 # V5 ---------------------------------------------------------------------------
+def _duplicate_abbreviations(race_results_rows) -> list[str]:
+    """Singkatan yang dipakai dua driver berbeda (driver_name berbeda). Baris tanpa nama dilewati."""
+    names: dict[str, list[str]] = {}
+    for r in race_results_rows:
+        abbr = str(r.get("driver_abbr") or "")
+        name = str(r.get("driver_name") or "").strip()
+        if not abbr or not name:
+            continue
+        seen = names.setdefault(abbr, [])
+        if name not in seen:
+            seen.append(name)
+    return [f"{abbr} dipakai oleh {' dan '.join(seen)}"
+            for abbr, seen in sorted(names.items()) if len(seen) > 1]
+
+
 def check_v5(race_results_rows) -> dict:
     bad_abbr, bad_team, bad_pos = set(), 0, 0
     for r in race_results_rows:
@@ -115,32 +130,42 @@ def check_v5(race_results_rows) -> dict:
             bad_team += 1
         if r.get("position") is None:
             bad_pos += 1
+    duplicates = _duplicate_abbreviations(race_results_rows)
     problems = []
     if bad_abbr:
         problems.append(f"driver_abbr tidak valid: {sorted(bad_abbr)[:_MAX_LISTED]}")
+    if duplicates:
+        problems.append("singkatan ganda: " + _listed(duplicates))
     if bad_team:
         problems.append(f"{bad_team} baris tanpa team_name")
     if bad_pos:
         problems.append(f"{bad_pos} baris dengan position null")
     if not problems:
-        return _result("V5", "ok", "driver_abbr, team_name, dan position valid di semua baris.")
+        return _result("V5", "ok", "driver_abbr, team_name, dan position valid di semua baris; tidak ada singkatan ganda.")
     return _result("V5", "fail", "; ".join(problems) + ".")
 
 
 # V6 ---------------------------------------------------------------------------
-def check_v6(driver_rows, race_results_rows) -> dict:
-    counts: dict[int, int] = {}
+def check_v6(constructor_rows, race_results_rows) -> dict:
+    """Jumlah baris tiap round Race dan Sprint dibandingkan dengan 2 x jumlah konstruktor
+    (bukan jumlah driver di standings: driver yang ganti kursi membuat standings lebih panjang)."""
+    counts: dict[tuple[str, int], int] = {}
     for r in race_results_rows:
-        if r["session"] == "Race":
-            counts[int(r["round"])] = counts.get(int(r["round"]), 0) + 1
+        if r["session"] in ("Race", "Sprint"):
+            key = (r["session"], int(r["round"]))
+            counts[key] = counts.get(key, 0) + 1
     if not counts:
         return _result("V6", "ok", "Belum ada hasil Race; pengecekan jumlah baris dilewati.")
-    n_drivers = len(driver_rows)
-    bad = [f"round {rnd}: {n} baris" for rnd, n in sorted(counts.items())
-           if abs(n - n_drivers) > ROW_COUNT_TOLERANCE]
+    n_teams = len(constructor_rows)
+    if n_teams == 0:
+        return _result("V6", "ok", "Standings konstruktor kosong; pengecekan jumlah baris dilewati.")
+    cars = 2 * n_teams
+    low = cars - ROW_COUNT_SHORT_TOLERANCE
+    bad = [f"{session} round {rnd}: {n} baris" for (session, rnd), n in sorted(counts.items(), key=lambda kv: (kv[0][1], kv[0][0]))
+           if n < low or n > cars]
     if not bad:
-        return _result("V6", "ok", f"Jumlah baris per round Race sesuai {n_drivers} driver di standings (±{ROW_COUNT_TOLERANCE}).")
-    return _result("V6", "warn", f"Standings punya {n_drivers} driver, tapi " + _listed(bad) + ".")
+        return _result("V6", "ok", f"Jumlah baris per round Race dan Sprint sesuai {n_teams} tim ({low}-{cars} baris).")
+    return _result("V6", "warn", f"{n_teams} tim berarti {low}-{cars} baris per round, tapi " + _listed(bad) + ".")
 
 
 # Gabungan ---------------------------------------------------------------------
@@ -161,6 +186,6 @@ def run_checks(driver_rows, constructor_rows, race_results_rows, schedule_full_r
         check_v3(driver_rows, race_results_rows),
         check_v4(race_results_rows, schedule_full_rows),
         check_v5(race_results_rows),
-        check_v6(driver_rows, race_results_rows),
+        check_v6(constructor_rows, race_results_rows),
     ]
     return overall_status(results), results
