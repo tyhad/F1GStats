@@ -7,6 +7,10 @@ Format mengikuti [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ## [Unreleased]
 
+### Changed
+- V5 (`validation.py`) juga gagal (`fail`) bila dua driver berbeda (`driver_name` berbeda) memakai satu singkatan; pesan menyebut singkatan dan kedua nama. Baris tanpa `driver_name` dilewati.
+- V6 tidak lagi membandingkan jumlah baris per round dengan jumlah driver di standings (25 driver vs 22 mobil memicu peringatan palsu). Sekarang tiap round Race dan Sprint dibandingkan dengan `2 × jumlah konstruktor`: kurang dari `2 × tim − 2` atau lebih dari `2 × tim` adalah `warn`. `check_v6` kini menerima `(constructor_rows, race_results_rows)`. Tes: `tests/test_validation.py`.
+
 ### Added
 - Flag CLI `--verbose` pada `fetch_f1_data.py`: baris `[DEBUG]` (daftar kolom API dan sampel baris) kini disembunyikan secara default untuk output yang lebih bersih saat dijalankan via skrip/refresh; flag `--verbose` mengaktifkannya kembali. Tes: `tests/test_verbose.py`.
 

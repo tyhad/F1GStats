@@ -99,12 +99,14 @@ GP points depend on the share of scheduled distance completed by the leader. No 
 | V2 | Each completed GP total ∈ {101, 79, 52, 16, 0}; each sprint total ∈ {36, 0} | warn |
 | V3 | For every driver: sum of `race_results.points` (Race + Sprint) = `driver_standings.points` | fail |
 | V4 | Rounds that have Race results = rounds in `schedule_full` with `status = completed` | fail |
-| V5 | `driver_abbr` matches `^[A-Z]{3}$`; `team_name` non-empty; `position` not null | fail |
-| V6 | Rows per Race round = number of drivers in standings (±2) | warn |
+| V5 | `driver_abbr` matches `^[A-Z]{3}$`; `team_name` non-empty; `position` not null; no abbreviation is shared by two different `driver_name` values | fail |
+| V6 | Rows per Race and per Sprint round are between `2 × teams − 2` and `2 × teams`, where teams = rows in `constructor_standings` | warn |
 
 Notes:
 - V2 can legitimately be lower than 101 when fewer than 10 drivers are classified.
 - V3 and V4 will fail right after a race while the API has not published results or standings yet. That is expected: the old data stays, and re-running later fixes it.
+- V5 compares names only for rows that have a `driver_name`; the message lists the abbreviation and both names.
+- V6 uses the number of constructors, not the number of drivers in the standings: the standings also list drivers who changed seats (25 drivers against 22 cars is normal). Without constructor rows, or without results yet, V6 is skipped (ok).
 - Overall status: `fail` if any fail, else `warn` if any warn, else `ok`.
 
 ## 6. Exit codes

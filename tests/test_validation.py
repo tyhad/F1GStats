@@ -127,22 +127,117 @@ def test_v5_empty_team_or_null_position_is_fail():
     assert run(data)[1]["V5"]["status"] == "fail"
 
 
-def test_v6_row_count_far_from_standings_is_warn():
-    data = build()
-    for i in range(5):  # 5 driver tambahan tanpa poin -> 17 di standings vs 12 baris per round
-        data["driver_rows"].append({"position": 13 + i, "driver_abbr": f"Z{chr(65 + i)}Z",
-                                    "team_name": "TeamX", "points": 0.0})
+def test_v5_two_names_one_abbreviation_is_fail():
+    data = build_cars()
+    rows = [r for r in data["race_results_rows"] if r["round"] == 2]
+    rows[0]["driver_abbr"] = rows[1]["driver_abbr"]   # dua driver berbeda, satu singkatan
     status, by_id = run(data)
+    assert by_id["V5"]["status"] == "fail"
+    msg = by_id["V5"]["message"]
+    assert rows[1]["driver_abbr"] in msg
+    assert rows[0]["driver_name"] in msg and rows[1]["driver_name"] in msg
+    assert status == "fail"
+
+
+def test_v5_same_driver_same_name_in_many_rounds_is_ok():
+    assert run(build_cars())[1]["V5"]["status"] == "ok"
+
+
+def test_v5_rows_without_driver_name_do_not_trigger_duplicate_check():
+    # fixture lama (build) tidak punya driver_name; itu bukan pelanggaran
+    assert run(build())[1]["V5"]["status"] == "ok"
+
+
+def test_v5_new_driver_with_derived_abbreviation_still_passes():
+    # driver baru: kode kosong di API, singkatan diturunkan dari familyName (mis. 'LIN'); nama unik
+    data = build_cars()
+    data["race_results_rows"].append({"season": 2026, "round": 2, "session": "Race",
+                                      "driver_abbr": "LIN", "driver_name": "Arvid Lindblad",
+                                      "team_name": "Team0", "position": 23, "points": 0.0})
+    data["driver_rows"].append({"position": 26, "driver_abbr": "LIN", "team_name": "Team0", "points": 0.0})
+    assert run(data)[1]["V5"]["status"] == "ok"
+
+
+def build_cars(n_teams=11, n_standings_drivers=25, rows_per_round=None, sprint=False):
+    """Musim buatan: n_teams tim, 2 mobil per tim, standings boleh punya lebih banyak driver
+    (driver yang pernah ganti kursi). rows_per_round: {round: jumlah baris Race} (default 2 x tim)."""
+    n_cars = 2 * n_teams
+    rows_per_round = rows_per_round or {1: n_cars, 2: n_cars}
+    abbrs = [f"D{chr(65 + i // 26)}{chr(65 + i % 26)}" for i in range(n_standings_drivers)]
+    gp = [25, 18, 15, 12, 10, 8, 6, 4, 2, 1] + [0] * 40
+    results = []
+    for rnd, n_rows in rows_per_round.items():
+        for i in range(n_rows):
+            results.append({"season": 2026, "round": rnd, "session": "Race", "driver_abbr": abbrs[i],
+                            "driver_name": f"Name {abbrs[i]}", "team_name": f"Team{i // 2}",
+                            "position": i + 1, "points": float(gp[i])})
+    if sprint:
+        for i in range(n_cars):
+            results.append({"season": 2026, "round": 2, "session": "Sprint", "driver_abbr": abbrs[i],
+                            "driver_name": f"Name {abbrs[i]}", "team_name": f"Team{i // 2}",
+                            "position": i + 1, "points": float([8, 7, 6, 5, 4, 3, 2, 1][i] if i < 8 else 0)})
+    totals = {a: 0.0 for a in abbrs}
+    for r in results:
+        totals[r["driver_abbr"]] += r["points"]
+    drivers = [{"position": i + 1, "driver_abbr": a, "team_name": "x", "points": totals[a]}
+               for i, a in enumerate(abbrs)]
+    team_pts = {}
+    for r in results:
+        team_pts[r["team_name"]] = team_pts.get(r["team_name"], 0.0) + r["points"]
+    constructors = [{"position": i + 1, "team_name": f"Team{i}", "points": team_pts.get(f"Team{i}", 0.0)}
+                    for i in range(n_teams)]
+    schedule = [{"season": 2026, "round": rnd, "has_sprint": 0, "status": "completed"}
+                for rnd in rows_per_round]
+    return dict(driver_rows=drivers, constructor_rows=constructors,
+                race_results_rows=results, schedule_full_rows=schedule)
+
+
+def test_v6_more_drivers_in_standings_than_cars_is_ok():
+    # 25 driver di standings, 22 baris per round, 11 tim: tidak ada yang salah
+    data = build_cars()
+    assert len(data["driver_rows"]) == 25
+    status, by_id = run(data)
+    assert by_id["V6"]["status"] == "ok"
+    assert status == "ok"
+
+
+def test_v6_too_few_rows_in_one_round_is_warn():
+    status, by_id = run(build_cars(rows_per_round={1: 22, 2: 19}))
     assert by_id["V6"]["status"] == "warn"
-    assert by_id["V3"]["status"] == "ok"
+    assert "2" in by_id["V6"]["message"] and "19" in by_id["V6"]["message"]
     assert status == "warn"
 
 
-def test_v6_within_tolerance_is_ok():
-    data = build()
-    for i in range(2):  # selisih 2 masih diperbolehkan
-        data["driver_rows"].append({"position": 13 + i, "driver_abbr": f"Y{chr(65 + i)}Y",
-                                    "team_name": "TeamX", "points": 0.0})
+def test_v6_too_many_rows_in_one_round_is_warn():
+    status, by_id = run(build_cars(rows_per_round={1: 22, 2: 24}))
+    assert by_id["V6"]["status"] == "warn"
+    assert "24" in by_id["V6"]["message"]
+
+
+def test_v6_bounds_are_2_below_and_exact_above():
+    assert run(build_cars(rows_per_round={1: 20, 2: 22}))[1]["V6"]["status"] == "ok"   # 2 x 11 - 2
+    assert run(build_cars(rows_per_round={1: 22, 2: 23}))[1]["V6"]["status"] == "warn"  # 2 x 11 + 1
+
+
+def test_v6_checks_sprint_rounds_too():
+    data = build_cars(sprint=True)
+    assert run(data)[1]["V6"]["status"] == "ok"
+    data["race_results_rows"] = [r for r in data["race_results_rows"]
+                                 if not (r["session"] == "Sprint" and r["position"] > 15)]
+    by_id = run(data)[1]
+    assert by_id["V6"]["status"] == "warn"
+    assert "Sprint" in by_id["V6"]["message"]
+
+
+def test_v6_uses_constructors_not_drivers():
+    # jumlah driver di standings berubah drastis, jumlah tim tetap: V6 tetap ok
+    data = build_cars(n_standings_drivers=30)
+    assert run(data)[1]["V6"]["status"] == "ok"
+
+
+def test_v6_without_constructors_is_skipped():
+    data = build_cars()
+    data["constructor_rows"] = []
     assert run(data)[1]["V6"]["status"] == "ok"
 
 
