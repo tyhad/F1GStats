@@ -8,6 +8,7 @@ Format mengikuti [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 ## [Unreleased]
 
 ### Changed
+- Starting grid OpenF1 yang belum terbit (OpenF1 menjawab 404 atau daftar kosong untuk `sessions` atau `starting_grid`) kini dicetak sebagai satu baris `[INFO] OpenF1 has no grid for round N yet; using the qualifying order, which ignores grid penalties`, bukan dua baris `[WARN]`: itu keadaan normal sebelum grid resmi terbit. Kegagalan sungguhan (timeout, error server, jawaban tak terbaca, data driver yang tidak cocok, round tanpa lokasi di schedule) tetap `[WARN]`. Data yang ditulis tidak berubah: grid tetap memakai urutan Qualifying (`grid_source = 'qualifying_fallback'`). Secara internal, `fetch_openf1_starting_grid` mengembalikan `OpenF1Grid(rows, status)` dengan status `GRID_OK` / `GRID_NOT_PUBLISHED` / `GRID_FAILED`, dan `_openf1_get` melempar `OpenF1NotFound` untuk 404. Tes: `tests/test_openf1_grid.py`.
 - V5 (`validation.py`) juga gagal (`fail`) bila dua driver berbeda (`driver_name` berbeda) memakai satu singkatan; pesan menyebut singkatan dan kedua nama. Baris tanpa `driver_name` dilewati.
 - V6 tidak lagi membandingkan jumlah baris per round dengan jumlah driver di standings (25 driver vs 22 mobil memicu peringatan palsu). Sekarang tiap round Race dan Sprint dibandingkan dengan `2 × jumlah konstruktor`: kurang dari `2 × tim − 2` atau lebih dari `2 × tim` adalah `warn`. `check_v6` kini menerima `(constructor_rows, race_results_rows)`. Tes: `tests/test_validation.py`.
 
@@ -15,7 +16,8 @@ Format mengikuti [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - Flag CLI `--verbose` pada `fetch_f1_data.py`: baris `[DEBUG]` (daftar kolom API dan sampel baris) kini disembunyikan secara default untuk output yang lebih bersih saat dijalankan via skrip/refresh; flag `--verbose` mengaktifkannya kembali. Tes: `tests/test_verbose.py`.
 
 ### Fixed
-- `driver_abbr` jadi `'nan'` (V5 fail) untuk driver yang `code`-nya tidak diisi API (mis. driver baru di akhir musim): kolom `driverCode` berisi NaN, dan `NaN or familyName` tetap NaN. Sekarang semua fetcher (hasil Race/Sprint, qualifying, starting grid fallback, standings, dan statistik podium/DNF) memakai satu helper `driver_abbr_from_row`: pakai `driverCode` kalau ada, kalau tidak turunkan 3 huruf dari `familyName` (tanpa aksen, huruf besar). Pengecualian manual lewat `_ABBR_OVERRIDES`. Tes baru: `tests/test_driver_abbr.py`.
+- Jawaban OpenF1 yang cacat (sesi tanpa `session_key`, atau jawaban yang bukan daftar) tidak lagi menghentikan run dengan `KeyError` / `TypeError`: dicatat sebagai `[WARN]` dan grid jatuh ke urutan Qualifying, seperti kegagalan OpenF1 lainnya.
+- `driver_abbr` jadi `'nan' (V5 fail) untuk driver yang `code`-nya tidak diisi API (mis. driver baru di akhir musim): kolom `driverCode` berisi NaN, dan `NaN or familyName` tetap NaN. Sekarang semua fetcher (hasil Race/Sprint, qualifying, starting grid fallback, standings, dan statistik podium/DNF) memakai satu helper `driver_abbr_from_row`: pakai `driverCode` kalau ada, kalau tidak turunkan 3 huruf dari `familyName` (tanpa aksen, huruf besar). Pengecualian manual lewat `_ABBR_OVERRIDES`. Tes baru: `tests/test_driver_abbr.py`.
 
 ### Added
 - Tabel `schedule_full`: semua round musim (tidak difilter), termasuk field `has_sprint`, `race_start_utc`, `sprint_start_utc`, dan `status` (`completed` / `scheduled`).

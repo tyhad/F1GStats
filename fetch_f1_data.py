@@ -32,6 +32,7 @@ import sqlite3
 import sys
 import unicodedata
 from datetime import datetime, timezone
+from typing import NamedTuple
 
 import fastf1
 import requests
@@ -619,14 +620,38 @@ def fetch_qualifying_rows(ergast: Ergast, season: int, verbose: bool | None = No
 
 OPENF1_BASE_URL = "https://api.openf1.org/v1"
 
+# Hasil pengambilan grid OpenF1 untuk satu round:
+GRID_OK = "ok"                        # grid resmi ada
+GRID_NOT_PUBLISHED = "not_published"  # OpenF1 menjawab 404 / daftar kosong: grid resmi belum terbit (normal)
+GRID_FAILED = "failed"                # timeout, error server, jawaban tak terbaca, atau data tak lengkap (masalah)
 
-def _openf1_get(path: str, params: dict, timeout: int = 10):
+
+class OpenF1NotFound(Exception):
+    """OpenF1 menjawab 404 ("No results found"): datanya belum dipublikasikan. Bukan kegagalan."""
+
+
+class OpenF1Grid(NamedTuple):
+    rows: list[dict] | None
+    status: str  # GRID_OK / GRID_NOT_PUBLISHED / GRID_FAILED
+
+
+def _openf1_get(path: str, params: dict, timeout: int = 10) -> list:
+    """
+    GET ke OpenF1. Mengembalikan daftar hasil.
+    404 -> OpenF1NotFound (belum ada datanya). Error HTTP lain, timeout, JSON rusak, atau jawaban yang bukan
+    daftar -> exception biasa (kegagalan sungguhan).
+    """
     resp = requests.get(f"{OPENF1_BASE_URL}/{path}", params=params, timeout=timeout)
+    if resp.status_code == 404:
+        raise OpenF1NotFound(f"OpenF1 menjawab 404 untuk '{path}'")
     resp.raise_for_status()
-    return resp.json()
+    data = resp.json()
+    if not isinstance(data, list):
+        raise ValueError(f"jawaban OpenF1 untuk '{path}' bukan daftar ({type(data).__name__})")
+    return data
 
 
-def fetch_openf1_starting_grid(season: int, location: str) -> list[dict] | None:
+def fetch_openf1_starting_grid(season: int, location: str) -> OpenF1Grid:
     """
     Ambil starting grid ACTUAL (sudah termasuk grid penalty kalau ada) dari
     OpenF1 API -- BUKAN raw hasil Qualifying. OpenF1 mempublikasikan data ini
@@ -635,42 +660,57 @@ def fetch_openf1_starting_grid(season: int, location: str) -> list[dict] | None:
     yang field "grid"-nya baru terisi SETELAH race selesai (karena itu bagian
     dari race result, bukan data pre-race).
 
-    Return None kalau sesi race untuk lokasi ini belum ketemu di OpenF1, atau
-    grid-nya belum dipublish (endpoint ini "sparse/beta", banyak sesi yang
-    datanya belum ada) -- caller WAJIB fallback ke Qualifying kalau None.
+    Status hasil:
+      - GRID_OK: `rows` berisi grid.
+      - GRID_NOT_PUBLISHED: sesi race atau grid-nya belum ada di OpenF1 (404 atau daftar kosong; endpoint ini
+        "sparse/beta"). Ini keadaan normal sebelum grid resmi terbit; tidak ada yang dicetak di sini.
+      - GRID_FAILED: kegagalan sungguhan (timeout, error server, jawaban tak terbaca, data driver tak cocok);
+        sebabnya dicetak sebagai [WARN] di sini.
+
+    Caller WAJIB fallback ke Qualifying kalau `rows` None.
     """
     try:
         sessions = _openf1_get("sessions", {
             "year": season, "location": location, "session_name": "Race",
         })
+    except OpenF1NotFound:
+        return OpenF1Grid(None, GRID_NOT_PUBLISHED)
     except Exception as exc:
         print(f"  [WARN] OpenF1: gagal cari session untuk lokasi '{location}' {season}: {exc}")
-        return None
+        return OpenF1Grid(None, GRID_FAILED)
 
     if not sessions:
-        return None
-    session_key = sessions[-1]["session_key"]
+        return OpenF1Grid(None, GRID_NOT_PUBLISHED)
+    try:
+        session_key = sessions[-1]["session_key"]
+    except (KeyError, TypeError) as exc:
+        print(f"  [WARN] OpenF1: jawaban session untuk lokasi '{location}' {season} tidak terbaca: {exc!r}")
+        return OpenF1Grid(None, GRID_FAILED)
 
     try:
         grid_rows = _openf1_get("starting_grid", {"session_key": session_key})
+    except OpenF1NotFound:
+        return OpenF1Grid(None, GRID_NOT_PUBLISHED)
     except Exception as exc:
         print(f"  [WARN] OpenF1: gagal fetch starting_grid (session_key={session_key}): {exc}")
-        return None
+        return OpenF1Grid(None, GRID_FAILED)
 
     if not grid_rows:
-        return None
+        return OpenF1Grid(None, GRID_NOT_PUBLISHED)
 
+    # Dari sini grid-nya ada. Kalau data driver-nya tidak bisa diambil atau tidak cocok, itu data yang rusak
+    # (bukan "belum terbit"): tetap [WARN].
     try:
         drivers = _openf1_get("drivers", {"session_key": session_key})
     except Exception as exc:
         print(f"  [WARN] OpenF1: gagal fetch drivers (session_key={session_key}): {exc}")
-        return None
+        return OpenF1Grid(None, GRID_FAILED)
 
-    drivers_by_number = {d["driver_number"]: d for d in drivers}
+    drivers_by_number = {d.get("driver_number"): d for d in drivers if isinstance(d, dict)}
 
     rows = []
     for g in grid_rows:
-        driver = drivers_by_number.get(g.get("driver_number"))
+        driver = drivers_by_number.get(g.get("driver_number")) if isinstance(g, dict) else None
         if not driver or g.get("position") is None:
             continue
         rows.append({
@@ -680,7 +720,9 @@ def fetch_openf1_starting_grid(season: int, location: str) -> list[dict] | None:
             "team_name": driver.get("team_name", ""),
         })
 
-    return rows if rows else None
+    if not rows:
+        return OpenF1Grid(None, GRID_FAILED)
+    return OpenF1Grid(rows, GRID_OK)
 
 
 def fetch_starting_grid(ergast: Ergast, season: int, rounds_to_fetch: set[int],
@@ -697,15 +739,19 @@ def fetch_starting_grid(ergast: Ergast, season: int, rounds_to_fetch: set[int],
 
     Kolom `grid_source` disimpan per baris ('openf1' / 'qualifying_fallback')
     supaya kamu bisa cek round mana yang masih pakai fallback.
+
+    Log: fallback karena grid resmi belum terbit (OpenF1 404 / daftar kosong) = [INFO]; fallback karena
+    kegagalan sungguhan (timeout, error server, jawaban tak terbaca) = [WARN]. Data yang ditulis sama.
     """
     rows = []
     for round_no in sorted(rounds_to_fetch):
         location = location_by_round.get(round_no, "")
 
-        openf1_rows = fetch_openf1_starting_grid(season, location) if location else None
-        if openf1_rows:
+        # Tanpa lokasi di schedule, OpenF1 tidak bisa ditanya: itu data yang kurang, jadi diperlakukan sebagai gagal.
+        grid = fetch_openf1_starting_grid(season, location) if location else OpenF1Grid(None, GRID_FAILED)
+        if grid.rows:
             print(f"  [INFO] Round {round_no}: starting grid dari OpenF1 (actual, post-penalty)")
-            for row in openf1_rows:
+            for row in grid.rows:
                 rows.append({
                     "round": round_no,
                     "round_relation": round_relations.get(round_no),
@@ -717,8 +763,13 @@ def fetch_starting_grid(ergast: Ergast, season: int, rounds_to_fetch: set[int],
                 })
             continue
 
-        print(f"  [WARN] Round {round_no}: starting grid OpenF1 belum tersedia "
-              f"-> fallback ke hasil Qualifying (BELUM termasuk grid penalty kalau ada)")
+        if grid.status == GRID_NOT_PUBLISHED:
+            # Normal: grid resmi belum terbit. Informasi, bukan peringatan.
+            print(f"  [INFO] OpenF1 has no grid for round {round_no} yet; "
+                  f"using the qualifying order, which ignores grid penalties")
+        else:
+            print(f"  [WARN] Round {round_no}: starting grid OpenF1 belum tersedia "
+                  f"-> fallback ke hasil Qualifying (BELUM termasuk grid penalty kalau ada)")
         try:
             resp = ergast.get_qualifying_results(season=season, round=round_no, limit=100)
         except Exception as exc:
