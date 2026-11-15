@@ -80,7 +80,7 @@ python fetch_f1_data.py --season 2026 --output ./f1gstats.sqlite
       -> 10 constructor
 [6/7] Fetch starting grid (OpenF1 actual, fallback Qualifying) round terkait ...
   [INFO] Round 17: starting grid dari OpenF1 (actual, post-penalty)
-  [WARN] Round 18: starting grid OpenF1 belum tersedia -> fallback ke hasil Qualifying
+  [INFO] OpenF1 has no grid for round 18 yet; using the qualifying order, which ignores grid penalties
 [7/7] Tulis ke SQLite: ./f1gstats.sqlite
 
 === FETCH SELESAI ===
@@ -231,6 +231,7 @@ Script secara otomatis membuat direktori `.fastf1_cache/` di folder project untu
 
 - **`round_relation`**: Script hanya menyimpan data untuk 2–3 round (previous, now, next). Data round lain tidak disimpan ke SQLite.
 - **`grid_source`**: Field ini menunjukkan apakah starting grid untuk suatu round berasal dari OpenF1 (actual, sudah termasuk grid penalty) atau dari hasil Qualifying via Ergast (fallback, belum termasuk grid penalty). Cek field ini untuk mengetahui akurasi data grid tiap round.
+- **Log grid OpenF1**: grid resmi baru terbit beberapa jam sebelum race, jadi sebelum itu OpenF1 menjawab 404 atau daftar kosong. Itu keadaan normal dan dicetak sebagai satu baris `[INFO]` ("OpenF1 has no grid for round N yet; using the qualifying order, which ignores grid penalties"); datanya memakai urutan Qualifying (`grid_source = 'qualifying_fallback'`). `[WARN]` hanya untuk kegagalan sungguhan: timeout, error server, jawaban yang tidak terbaca, atau data driver yang tidak cocok. Data yang ditulis sama dalam kedua kasus.
 - **Re-run**: Setiap kali script dijalankan, semua tabel data ditulis ulang dalam **satu transaksi SQLite**. `sessions`, `driver_standings`, `constructor_standings`, dan `starting_grid` dikosongkan lalu diisi ulang. `schedule_full` dan `race_results` **diganti per season** (`DELETE ... WHERE season = ?` lalu insert, bukan upsert), sehingga data season lain tidak tersentuh dan koreksi pasca-race ikut masuk. `meta` di-update (`season`, `last_fetched_at`, `schema_version`).
 - **Gagal = database tidak berubah**: kalau terjadi error saat menulis, transaksi di-rollback dan semua tabel tetap seperti sebelumnya. Proses keluar dengan exit code `1` (cek `echo %ERRORLEVEL%` di cmd atau `echo $LASTEXITCODE` di PowerShell).
 - **Validasi sebelum menulis**: data dicek (V1-V6, lihat `docs/DATA_CONTRACT.md`) sebelum transaksi dibuka. Hasilnya dicatat di tabel `data_health`. Status `fail` (mis. hasil race belum terbit sementara jadwal sudah `completed`) berarti tabel data **tidak disentuh** dan proses keluar dengan exit code `2`; jalankan ulang nanti. Status `ok`/`warn` menulis data (exit code `0`).
