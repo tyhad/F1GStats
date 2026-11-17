@@ -221,6 +221,19 @@ Baris dengan `status = 'fail'` berarti run itu **tidak menulis** tabel data; dat
 
 ---
 
+## Data and credits
+
+To the Flag is an unofficial fan project. It is not affiliated with, endorsed or sponsored by Formula 1, the FIA, Formula One Licensing B.V. or any team. F1, FORMULA 1 and related marks belong to their owners.
+
+The data comes from third-party sources, each under its own terms:
+- Jolpica F1 API (api.jolpi.ca), the community successor to the Ergast API: schedules, results and standings.
+- FastF1, a Python library: session data.
+- OpenF1: starting-grid information.
+
+Check each source's terms before reusing its data. What the owner checked is recorded in [`docs/DATA_TERMS.md`](https://github.com/tyhad/to-the-flag/blob/main/docs/DATA_TERMS.md) in the To the Flag repository.
+
+---
+
 ## Cache FastF1
 
 Script secara otomatis membuat direktori `.fastf1_cache/` di folder project untuk menyimpan cache session FastF1. Direktori ini di-ignore oleh Git (lihat `.gitignore`) karena ukurannya bisa sangat besar.
@@ -236,3 +249,9 @@ Script secara otomatis membuat direktori `.fastf1_cache/` di folder project untu
 - **Gagal = database tidak berubah**: kalau terjadi error saat menulis, transaksi di-rollback dan semua tabel tetap seperti sebelumnya. Proses keluar dengan exit code `1` (cek `echo %ERRORLEVEL%` di cmd atau `echo $LASTEXITCODE` di PowerShell).
 - **Validasi sebelum menulis**: data dicek (V1-V6, lihat `docs/DATA_CONTRACT.md`) sebelum transaksi dibuka. Hasilnya dicatat di tabel `data_health`. Status `fail` (mis. hasil race belum terbit sementara jadwal sudah `completed`) berarti tabel data **tidak disentuh** dan proses keluar dengan exit code `2`; jalankan ulang nanti. Status `ok`/`warn` menulis data (exit code `0`).
 - **Exit code**: `0` = ok atau warn (data ditulis), `1` = error tak terduga (tidak ada yang ditulis), `2` = validasi gagal (data tidak ditulis, `data_health` dicatat).
+
+---
+
+## License
+
+No license is granted. The source is public for reference; all rights are reserved.
