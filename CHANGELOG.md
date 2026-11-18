@@ -5,20 +5,7 @@ Format mengikuti [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 
 ---
 
-## [Unreleased]
-
-### Changed
-- README: bagian "Data and credits" (sumber data, pernyataan tidak berafiliasi dengan Formula 1, tautan ke catatan syarat data di repo To the Flag) dan bagian "License" (tidak ada lisensi: kode publik untuk dibaca, semua hak dilindungi). Hanya dokumentasi; tidak ada perubahan kode atau data.
-- Starting grid OpenF1 yang belum terbit (OpenF1 menjawab 404 atau daftar kosong untuk `sessions` atau `starting_grid`) kini dicetak sebagai satu baris `[INFO] OpenF1 has no grid for round N yet; using the qualifying order, which ignores grid penalties`, bukan dua baris `[WARN]`: itu keadaan normal sebelum grid resmi terbit. Kegagalan sungguhan (timeout, error server, jawaban tak terbaca, data driver yang tidak cocok, round tanpa lokasi di schedule) tetap `[WARN]`. Data yang ditulis tidak berubah: grid tetap memakai urutan Qualifying (`grid_source = 'qualifying_fallback'`). Secara internal, `fetch_openf1_starting_grid` mengembalikan `OpenF1Grid(rows, status)` dengan status `GRID_OK` / `GRID_NOT_PUBLISHED` / `GRID_FAILED`, dan `_openf1_get` melempar `OpenF1NotFound` untuk 404. Tes: `tests/test_openf1_grid.py`.
-- V5 (`validation.py`) juga gagal (`fail`) bila dua driver berbeda (`driver_name` berbeda) memakai satu singkatan; pesan menyebut singkatan dan kedua nama. Baris tanpa `driver_name` dilewati.
-- V6 tidak lagi membandingkan jumlah baris per round dengan jumlah driver di standings (25 driver vs 22 mobil memicu peringatan palsu). Sekarang tiap round Race dan Sprint dibandingkan dengan `2 × jumlah konstruktor`: kurang dari `2 × tim − 2` atau lebih dari `2 × tim` adalah `warn`. `check_v6` kini menerima `(constructor_rows, race_results_rows)`. Tes: `tests/test_validation.py`.
-
-### Added
-- Flag CLI `--verbose` pada `fetch_f1_data.py`: baris `[DEBUG]` (daftar kolom API dan sampel baris) kini disembunyikan secara default untuk output yang lebih bersih saat dijalankan via skrip/refresh; flag `--verbose` mengaktifkannya kembali. Tes: `tests/test_verbose.py`.
-
-### Fixed
-- Jawaban OpenF1 yang cacat (sesi tanpa `session_key`, atau jawaban yang bukan daftar) tidak lagi menghentikan run dengan `KeyError` / `TypeError`: dicatat sebagai `[WARN]` dan grid jatuh ke urutan Qualifying, seperti kegagalan OpenF1 lainnya.
-- `driver_abbr` jadi `'nan' (V5 fail) untuk driver yang `code`-nya tidak diisi API (mis. driver baru di akhir musim): kolom `driverCode` berisi NaN, dan `NaN or familyName` tetap NaN. Sekarang semua fetcher (hasil Race/Sprint, qualifying, starting grid fallback, standings, dan statistik podium/DNF) memakai satu helper `driver_abbr_from_row`: pakai `driverCode` kalau ada, kalau tidak turunkan 3 huruf dari `familyName` (tanpa aksen, huruf besar). Pengecualian manual lewat `_ABBR_OVERRIDES`. Tes baru: `tests/test_driver_abbr.py`.
+## [1.0.0] - 2026-11-18
 
 ### Added
 - Tabel `schedule_full`: semua round musim (tidak difilter), termasuk field `has_sprint`, `race_start_utc`, `sprint_start_utc`, dan `status` (`completed` / `scheduled`).
@@ -43,6 +30,7 @@ Format mengikuti [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `main()`: langkah `[7/12]` mencetak jumlah baris/round qualifying dan `[WARN]` informatif bila ada round dengan hasil Race tapi tanpa hasil Qualifying. `write_to_sqlite` menerima `qualifying_rows` (opsional; `None` = tabel tidak disentuh).
 - Tes: `tests/test_fetch_qualifying_rows.py` (mapping, paging 132 baris, driver tanpa Q2/Q3, error tidak ditelan), tes tulis/replace/rollback `qualifying_results` di `tests/test_write_to_sqlite.py`, dan `tests/test_main_gate.py` memeriksa qualifying ikut tertulis / tidak berubah saat validasi gagal.
 - README: dokumentasi tabel `qualifying_results`.
+- Flag CLI `--verbose` pada `fetch_f1_data.py`: baris `[DEBUG]` (daftar kolom API dan sampel baris) kini disembunyikan secara default untuk output yang lebih bersih saat dijalankan via skrip/refresh; flag `--verbose` mengaktifkannya kembali. Tes: `tests/test_verbose.py`.
 
 ### Changed
 - `fetch_results_rows`: error sungguhan saat fetch Sprint (jaringan/HTTP/JSON) tidak lagi ditelan dan dikembalikan sebagai `[]`; error naik ke `__main__`. Hanya respons kosong yang menjadi `[]`.
@@ -51,11 +39,17 @@ Format mengikuti [Keep a Changelog](https://keepachangelog.com/en/1.1.0/).
 - `write_to_sqlite`: seluruh penulisan data kini satu transaksi eksplisit (`BEGIN` ... `commit`). Error apa pun -> `rollback()`, koneksi ditutup, exception dilempar ulang, sehingga tabel tidak berubah. `__main__` mencetak error ke stderr dan `sys.exit(1)`.
 - `schedule_full` dan `race_results` diganti per season (replace, bukan upsert). Pembuatan tabel/migrasi kolom tetap idempotent dan berjalan sebelum transaksi data.
 - README: catatan "Re-run" diperbarui; `schema_version` ditambahkan ke deskripsi tabel `meta`.
+- README: bagian "Data and credits" (sumber data, pernyataan tidak berafiliasi dengan Formula 1, tautan ke catatan syarat data di repo To the Flag) dan bagian "License" (tidak ada lisensi: kode publik untuk dibaca, semua hak dilindungi). Hanya dokumentasi; tidak ada perubahan kode atau data.
+- Starting grid OpenF1 yang belum terbit (OpenF1 menjawab 404 atau daftar kosong untuk `sessions` atau `starting_grid`) kini dicetak sebagai satu baris `[INFO] OpenF1 has no grid for round N yet; using the qualifying order, which ignores grid penalties`, bukan dua baris `[WARN]`: itu keadaan normal sebelum grid resmi terbit. Kegagalan sungguhan (timeout, error server, jawaban tak terbaca, data driver yang tidak cocok, round tanpa lokasi di schedule) tetap `[WARN]`. Data yang ditulis tidak berubah: grid tetap memakai urutan Qualifying (`grid_source = 'qualifying_fallback'`). Secara internal, `fetch_openf1_starting_grid` mengembalikan `OpenF1Grid(rows, status)` dengan status `GRID_OK` / `GRID_NOT_PUBLISHED` / `GRID_FAILED`, dan `_openf1_get` melempar `OpenF1NotFound` untuk 404. Tes: `tests/test_openf1_grid.py`.
+- V5 (`validation.py`) juga gagal (`fail`) bila dua driver berbeda (`driver_name` berbeda) memakai satu singkatan; pesan menyebut singkatan dan kedua nama. Baris tanpa `driver_name` dilewati.
+- V6 tidak lagi membandingkan jumlah baris per round dengan jumlah driver di standings (25 driver vs 22 mobil memicu peringatan palsu). Sekarang tiap round Race dan Sprint dibandingkan dengan `2 × jumlah konstruktor`: kurang dari `2 × tim − 2` atau lebih dari `2 × tim` adalah `warn`. `check_v6` kini menerima `(constructor_rows, race_results_rows)`. Tes: `tests/test_validation.py`.
 
 ### Fixed
 - `race_results.position` sekarang diisi dari kolom API `position` (urutan akhir) untuk semua baris, termasuk pembalap tidak terklasifikasi (`R`, `D`, dst.). Sebelumnya `NULL` untuk mereka, yang melanggar V5 (`position` tidak boleh null). `is_classified` tetap dari `positionText`. **Perubahan nilai pada data Step 3/4.**
 - `fetch_all_race_results`: sekarang mengambil semua halaman hasil (helper `_iter_result_pages`). Sebelumnya hanya 100 baris pertama (~4-5 round) yang dihitung karena Jolpica membatasi respons dan `limit=2000` dipotong diam-diam, sehingga `podiums` dan `dnf_dns` di `driver_standings` dan `constructor_standings` terlalu kecil. Struktur tabel dan kolom tidak berubah; hanya nilainya yang jadi benar.
 - `fetch_results_rows`: sekarang mengambil semua halaman hasil (`get_next_result_page`). Jolpica membatasi respons ke 100 baris dan diam-diam memotong `limit=2000`, sehingga sebelumnya hanya ~5 round pertama yang tersimpan. Mencetak `total_results` dan memberi `[WARN]` bila jumlah baris terbaca tidak sama dengan total dari API.
+- Jawaban OpenF1 yang cacat (sesi tanpa `session_key`, atau jawaban yang bukan daftar) tidak lagi menghentikan run dengan `KeyError` / `TypeError`: dicatat sebagai `[WARN]` dan grid jatuh ke urutan Qualifying, seperti kegagalan OpenF1 lainnya.
+- `driver_abbr` jadi `'nan' (V5 fail) untuk driver yang `code`-nya tidak diisi API (mis. driver baru di akhir musim): kolom `driverCode` berisi NaN, dan `NaN or familyName` tetap NaN. Sekarang semua fetcher (hasil Race/Sprint, qualifying, starting grid fallback, standings, dan statistik podium/DNF) memakai satu helper `driver_abbr_from_row`: pakai `driverCode` kalau ada, kalau tidak turunkan 3 huruf dari `familyName` (tanpa aksen, huruf besar). Pengecualian manual lewat `_ABBR_OVERRIDES`. Tes baru: `tests/test_driver_abbr.py`.
 
 ---
 
